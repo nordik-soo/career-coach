@@ -1,0 +1,443 @@
+"""Reference data loaders: NOC 2021, OaSIS skills, regulated occupations.
+
+These CSVs are downloaded manually (one-time) into ./data/ — see README.
+This module just loads them into Postgres. If a CSV is missing, the loader
+logs a warning and skips; the system can still run with empty reference.
+"""
+from __future__ import annotations
+
+import csv
+import logging
+from pathlib import Path
+
+from config import (
+    NOC_CSV_PATH,
+    NOC_SKILL_CSV,
+    OASIS_EXAMPLE_TITLES_EN_CSV,
+    OASIS_EXAMPLE_TITLES_FR_CSV,
+    OASIS_LEAD_STATEMENT_EN_CSV,
+    OASIS_LEAD_STATEMENT_FR_CSV,
+    OASIS_SKILL_CSV,
+    OASIS_VERSION,
+    REGULATED_OCCUPATIONS_CSV,
+    SCT_ALTERNATIVE_TITLES_CSV,
+)
+from skillbridge.db import sync_cursor
+from skillbridge.extract.base import invalidate_reference_cache
+
+log = logging.getLogger(__name__)
+
+
+def _load_csv(path: Path) -> list[dict]:
+    if not path.exists():
+        log.warning("Reference CSV missing: %s", path)
+        return []
+    with path.open(encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
+def load_noc(path: Path = NOC_CSV_PATH) -> int:
+    rows = _load_csv(path)
+    n = 0
+    with sync_cursor() as cur:
+        for r in rows:
+            code = (r.get("noc_code") or r.get("NOC Code") or r.get("Code")
+                    or r.get("Code 2021") or "").strip()
+            title = (r.get("title") or r.get("title_en") or r.get("Title") or "").strip()
+            teer = r.get("teer") or r.get("TEER")
+            if not code or not title:
+                continue
+            cur.execute(
+                """
+                INSERT INTO reference.occupation (noc_code, title, teer, description, parent_code)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (noc_code) DO UPDATE SET
+                    title = EXCLUDED.title, teer = EXCLUDED.teer
+                """,
+                (code, title, int(teer) if (teer and str(teer).isdigit()) else None,
+                 r.get("description"), r.get("parent_code") or None),
+            )
+            n += 1
+    log.info("Loaded %d NOC rows from %s", n, path)
+    return n
+
+
+def load_oasis_skills(path: Path = OASIS_SKILL_CSV) -> int:
+    rows = _load_csv(path)
+    n = 0
+    with sync_cursor() as cur:
+        for r in rows:
+            sid = (r.get("skill_id") or r.get("Skill ID") or r.get("id") or "").strip()
+            name = (r.get("skill_name") or r.get("skill_name_en") or r.get("name") or "").strip()
+            if not sid or not name:
+                continue
+            aliases_raw = r.get("aliases") or ""
+            aliases = [a.strip() for a in aliases_raw.split(";") if a.strip()] if aliases_raw else []
+            cur.execute(
+                """
+                INSERT INTO reference.skill (skill_id, skill_name, aliases, source_taxonomy, category, description)
+                VALUES (%s, %s, %s, 'OaSIS', %s, %s)
+                ON CONFLICT (skill_id) DO UPDATE SET
+                    skill_name = EXCLUDED.skill_name,
+                    aliases    = EXCLUDED.aliases,
+                    category   = EXCLUDED.category
+                """,
+                (sid, name, aliases, r.get("category"), r.get("description")),
+            )
+            n += 1
+    log.info("Loaded %d OaSIS skills from %s", n, path)
+    invalidate_reference_cache()
+    return n
+
+
+def load_noc_skill_mapping(path: Path = NOC_SKILL_CSV) -> int:
+    rows = _load_csv(path)
+    n = 0
+    with sync_cursor() as cur:
+        for r in rows:
+            noc = (r.get("noc_code") or r.get("NOC") or "").strip()
+            sid = (r.get("skill_id") or r.get("Skill ID") or "").strip()
+            if not noc or not sid:
+                continue
+            try:
+                importance = float(r.get("importance") or r.get("Importance") or 0)
+            except ValueError:
+                importance = 0.0
+            try:
+                level = float(r.get("level") or r.get("Level") or 0)
+            except ValueError:
+                level = 0.0
+            cur.execute(
+                """
+                INSERT INTO reference.noc_skill (noc_code, skill_id, importance, level)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (noc_code, skill_id) DO UPDATE SET
+                    importance = EXCLUDED.importance, level = EXCLUDED.level
+                """,
+                (noc, sid, importance, level),
+            )
+            n += 1
+    log.info("Loaded %d NOC-skill mappings", n)
+    return n
+
+
+# =========================================================================
+# Matching v2 step 1: OaSIS + SCT occupation-title lexicon.
+# See docs/matching-v2-design.md §3 and docs/oasis-download.md.
+# =========================================================================
+
+# Heuristic column lookups. OaSIS/SCT CSVs vary slightly between releases;
+# we try each candidate in order so the loader survives minor renames.
+_NOC_COLS = (
+    "noc_code", "NOC Code", "Code", "Code 2021", "Code CNP 2021",
+    "noc_2021_code", "NOC", "noc",
+    # OaSIS 2025 release uses "OaSIS profile code" (e.g. "21232.00").
+    # The bare digits + `.XX` subprofile suffix get split by the
+    # parser; the 5-digit prefix is the NOC unit group.
+    "OaSIS profile code",
+    # FR OaSIS 2025: "Code de profil SIPeC" (example titles) and
+    # "Code de profil professionnel SIPeC" (lead statements).
+    "Code de profil SIPeC",
+    "Code de profil professionnel SIPeC",
+)
+_TITLE_COLS = (
+    "title", "Title", "Example Title", "example_title", "Titre",
+    "Titre d'exemple", "alternative_title", "Alternative Title",
+    "Titre alternatif",
+    # OaSIS 2025 + SCT 2023 column names.
+    "Job title text", "Alternative Title text",
+    # FR OaSIS 2025.
+    "Appellation d'emploi",
+)
+_LEAD_COLS = (
+    "lead_statement", "Lead Statement", "lead_statement_en",
+    "Lead statement", "Énoncé principal", "enonce_principal",
+)
+
+
+def _first(d: dict, keys: tuple[str, ...]) -> str:
+    """Return the first non-empty value from `d` matching any key in `keys`."""
+    for k in keys:
+        v = d.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
+def _parse_title_synonym_rows(
+    rows: list[dict], *, lang: str, source: str,
+) -> list[tuple[str, str, str, str]]:
+    """Parse OaSIS example-titles / SCT alternative-titles rows.
+
+    Returns a deduplicated list of (noc_code, title, lang, source) tuples.
+    Factored out for unit-testability without disk reads.
+
+    NOC codes in OaSIS data appear as either bare 5-digit ("21232") or
+    sub-occupation form ("21232.00"). We normalize to the 5-digit NOC
+    by stripping the decimal portion -- that's the NOC 2021 code that
+    matches reference.occupation.noc_code.
+    """
+    out: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()  # (noc, title) -- dedup
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        raw_noc = _first(r, _NOC_COLS)
+        title = _first(r, _TITLE_COLS)
+        if not raw_noc or not title:
+            continue
+        # "21232.00" -> "21232"; bare "21232" stays "21232".
+        noc = raw_noc.split(".", 1)[0].strip()
+        if len(noc) != 5 or not noc.isdigit():
+            continue
+        key = (noc, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((noc, title, lang, source))
+    return out
+
+
+def _parse_lead_statement_rows(
+    rows: list[dict],
+) -> list[tuple[str, str]]:
+    """Parse OaSIS lead-statement rows -> [(noc_code, lead_statement), ...]."""
+    out: list[tuple[str, str]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        raw_noc = _first(r, _NOC_COLS)
+        lead = _first(r, _LEAD_COLS)
+        if not raw_noc or not lead:
+            continue
+        noc = raw_noc.split(".", 1)[0].strip()
+        if len(noc) != 5 or not noc.isdigit():
+            continue
+        out.append((noc, lead))
+    return out
+
+
+def load_oasis_occupation_titles(
+    en_path: Path = OASIS_EXAMPLE_TITLES_EN_CSV,
+    fr_path: Path = OASIS_EXAMPLE_TITLES_FR_CSV,
+    sct_path: Path = SCT_ALTERNATIVE_TITLES_CSV,
+) -> int:
+    """Populate reference.occupation_title_synonym from OaSIS + SCT title files.
+
+    Idempotent. Missing files log a warning and are skipped, mirroring the
+    other reference loaders. Auto-creates parent reference.occupation rows
+    (with the synonym as a placeholder canonical title) if the NOC isn't
+    already in the occupation table -- so this loader is useful even when
+    the user hasn't yet downloaded the full NOC reference CSV.
+    """
+    tuples: list[tuple[str, str, str, str]] = []
+    tuples += _parse_title_synonym_rows(
+        _load_csv(en_path), lang="en", source="oasis_example",
+    )
+    tuples += _parse_title_synonym_rows(
+        _load_csv(fr_path), lang="fr", source="oasis_example",
+    )
+    # SCT alternative-titles CSV is bilingual: each row has both EN and FR
+    # in the same file. We parse twice with different column targets.
+    sct_rows = _load_csv(sct_path)
+    tuples += _parse_title_synonym_rows(
+        sct_rows, lang="en", source="sct_alternative",
+    )
+    # For the FR pass on the SCT bilingual file, retry with French-leaning
+    # column names. _parse_title_synonym_rows uses _TITLE_COLS which already
+    # includes French variants ("Titre alternatif" etc.) -- it just picks
+    # the first non-empty hit, so for rows where the EN column was empty,
+    # the FR pass would pick FR text. Practical fallback: if the SCT file
+    # has parallel EN+FR columns, we get both languages without duplicate
+    # rows (the (noc, title) dedup key prevents collision).
+
+    if not tuples:
+        log.warning(
+            "No occupation title synonyms parsed; CSVs at %s / %s / %s may "
+            "be missing or empty. Run docs/oasis-download.md.",
+            en_path, fr_path, sct_path,
+        )
+        return 0
+
+    n = 0
+    with sync_cursor() as cur:
+        # Pass 1: ensure all NOC codes exist in reference.occupation. Use
+        # the most common EN title for each NOC as the placeholder canonical
+        # so the FK constraint is satisfied.
+        en_titles_by_noc: dict[str, str] = {}
+        for noc, title, lang, source in tuples:
+            if lang == "en" and source == "oasis_example":
+                en_titles_by_noc.setdefault(noc, title)
+        for noc, placeholder_title in en_titles_by_noc.items():
+            cur.execute(
+                """
+                INSERT INTO reference.occupation
+                    (noc_code, title, oasis_version)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (noc_code) DO UPDATE SET
+                    oasis_version = EXCLUDED.oasis_version
+                """,
+                (noc, placeholder_title, OASIS_VERSION),
+            )
+
+        # Pass 2: upsert the synonym rows.
+        # OASIS-FIX: count ACTUALLY-INSERTED rows (not attempts). ON
+        # CONFLICT DO NOTHING returns rowcount=0 for skipped rows, so
+        # `n += cur.rowcount` gives an honest reading: 0 on a re-run
+        # of the same dataset, real numbers only on truly new rows.
+        for noc, title, lang, source in tuples:
+            cur.execute(
+                """
+                INSERT INTO reference.occupation_title_synonym
+                    (noc_code, title, lang, source)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (noc_code, title, lang, source) DO NOTHING
+                """,
+                (noc, title, lang, source),
+            )
+            n += cur.rowcount
+    log.info(
+        "Loaded %d new occupation title synonyms (of %d attempted) "
+        "across %d NOC codes (oasis_version=%s)",
+        n, len(tuples), len(en_titles_by_noc), OASIS_VERSION,
+    )
+    return n
+
+
+def load_oasis_lead_statements(
+    en_path: Path = OASIS_LEAD_STATEMENT_EN_CSV,
+    fr_path: Path = OASIS_LEAD_STATEMENT_FR_CSV,
+) -> int:
+    """Augment reference.occupation rows with EN + FR lead statements.
+
+    Idempotent. Missing files log a warning and are skipped. Does not
+    create new occupation rows -- only updates existing ones (lead
+    statements without a corresponding NOC are ignored).
+    """
+    en_pairs = _parse_lead_statement_rows(_load_csv(en_path))
+    fr_pairs = _parse_lead_statement_rows(_load_csv(fr_path))
+    if not en_pairs and not fr_pairs:
+        log.warning(
+            "No lead statements parsed; CSVs at %s / %s may be missing.",
+            en_path, fr_path,
+        )
+        return 0
+    # OASIS-FIX: keep-first semantics + EN/FR independent counts.
+    # The CSV contains 5-digit NOC + `.XX` subprofile suffix; the
+    # parser collapses subprofiles to the parent NOC. Multiple
+    # subprofiles map to the same NOC, so an unconditional UPDATE
+    # would overwrite each prior write (last-subprofile-wins).
+    # Guard with `WHERE ... IS NULL` so the FIRST subprofile to land
+    # for a given NOC wins; subsequent ones leave the existing value
+    # alone. Re-runs against an already-populated DB become no-ops
+    # (rowcount=0).
+    #
+    # `n` counts distinct occupation rows that received a statement
+    # across BOTH languages -- not row-touches and not attempts.
+    n_en = 0
+    n_fr = 0
+    with sync_cursor() as cur:
+        for noc, lead in en_pairs:
+            cur.execute(
+                "UPDATE reference.occupation SET lead_statement_en = %s "
+                "WHERE noc_code = %s AND lead_statement_en IS NULL",
+                (lead, noc),
+            )
+            n_en += cur.rowcount
+        for noc, lead in fr_pairs:
+            cur.execute(
+                "UPDATE reference.occupation SET lead_statement_fr = %s "
+                "WHERE noc_code = %s AND lead_statement_fr IS NULL",
+                (lead, noc),
+            )
+            n_fr += cur.rowcount
+    log.info(
+        "Lead statements written: %d EN + %d FR (keep-first; re-runs "
+        "report 0 on already-populated occupations)",
+        n_en, n_fr,
+    )
+    return n_en + n_fr
+
+
+def load_regulated_occupations(path: Path = REGULATED_OCCUPATIONS_CSV) -> int:
+    """Ontario regulated occupations. CSV columns:
+    noc_code, occupation_title, regulator_name, regulator_url, licensing_note
+    """
+    rows = _load_csv(path)
+    if not rows:
+        # Seed a small starter set so the credential-warning feature has data
+        # even before the full Ontario regulators list is curated.
+        rows = _SEED_REGULATED_OCCUPATIONS
+    n = 0
+    with sync_cursor() as cur:
+        for r in rows:
+            noc = (r.get("noc_code") or "").strip()
+            title = (r.get("occupation_title") or "").strip()
+            if not noc or not title:
+                continue
+            cur.execute(
+                """
+                INSERT INTO core.regulated_occupation
+                    (noc_code, occupation_title, regulator_name, regulator_url, licensing_note)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (noc_code) DO UPDATE SET
+                    occupation_title = EXCLUDED.occupation_title,
+                    regulator_name   = EXCLUDED.regulator_name,
+                    regulator_url    = EXCLUDED.regulator_url,
+                    licensing_note   = EXCLUDED.licensing_note
+                """,
+                (noc, title, r.get("regulator_name"), r.get("regulator_url"),
+                 r.get("licensing_note")),
+            )
+            n += 1
+    log.info("Loaded %d regulated occupations", n)
+    return n
+
+
+# Seeds — replace with full Ontario regulated occupations CSV when curated.
+_SEED_REGULATED_OCCUPATIONS = [
+    {"noc_code": "31301", "occupation_title": "Registered nurses",
+     "regulator_name": "College of Nurses of Ontario",
+     "regulator_url": "https://www.cno.org/",
+     "licensing_note": "Internationally educated nurses must register with CNO."},
+    {"noc_code": "31102", "occupation_title": "General practitioners and family physicians",
+     "regulator_name": "College of Physicians and Surgeons of Ontario",
+     "regulator_url": "https://www.cpso.on.ca/",
+     "licensing_note": "Physicians require CPSO licensure and (usually) Canadian residency or equivalency."},
+    {"noc_code": "72200", "occupation_title": "Electricians (except industrial and power system)",
+     "regulator_name": "Ontario College of Trades / Skilled Trades Ontario",
+     "regulator_url": "https://www.skilledtradesontario.ca/",
+     "licensing_note": "Compulsory trade — Certificate of Qualification required to work."},
+    {"noc_code": "72201", "occupation_title": "Industrial electricians",
+     "regulator_name": "Skilled Trades Ontario",
+     "regulator_url": "https://www.skilledtradesontario.ca/",
+     "licensing_note": "Compulsory trade in Ontario."},
+    {"noc_code": "31201", "occupation_title": "Pharmacists",
+     "regulator_name": "Ontario College of Pharmacists",
+     "regulator_url": "https://www.ocpinfo.com/",
+     "licensing_note": "Internationally trained pharmacists must complete OCP registration."},
+    {"noc_code": "11100", "occupation_title": "Financial auditors and accountants",
+     "regulator_name": "CPA Ontario",
+     "regulator_url": "https://www.cpaontario.ca/",
+     "licensing_note": "Public accounting requires CPA designation."},
+    {"noc_code": "41200", "occupation_title": "Elementary school and kindergarten teachers",
+     "regulator_name": "Ontario College of Teachers",
+     "regulator_url": "https://www.oct.ca/",
+     "licensing_note": "Teachers must hold an OCT Certificate of Qualification."},
+]
+
+
+def load_all() -> dict[str, int]:
+    return {
+        "noc": load_noc(),
+        "oasis_skills": load_oasis_skills(),
+        "noc_skill_mapping": load_noc_skill_mapping(),
+        "regulated_occupations": load_regulated_occupations(),
+        # Matching v2 step 1: OaSIS + SCT occupation-title lexicon. Each
+        # loader skips gracefully when the CSV isn't present (warning only).
+        "oasis_occupation_titles": load_oasis_occupation_titles(),
+        "oasis_lead_statements": load_oasis_lead_statements(),
+    }

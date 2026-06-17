@@ -1,0 +1,588 @@
+# SkillBridge SSM — Training Registry (v1 seed)
+#
+# This file is the SOURCE OF TRUTH for training recommendations served by
+# the chat. Every URL the chat cites for training must originate from this
+# file. See:
+#   docs/training-registry-schema.md      — field reference
+#   docs/training-providers-allowlist.md  — who we link to and why
+#
+# ====================================================================
+# REVIEW STATUS: PENDING HUMAN VERIFICATION
+# ====================================================================
+# The URLs below are candidate paths based on the providers' known site
+# structures. The lead engineer MUST verify each one against the live site
+# before merging this file and flipping the recommender on. Until then,
+# this YAML is loaded only in tests/CI; the production loader is gated
+# behind TRAINING_REGISTRY_ENABLED env var.
+#
+# Verification checklist per entry:
+#   1. URL resolves (200 OK)
+#   2. Page content matches the resource summary
+#   3. URL is structured/durable (not a marketing landing redirected to a
+#      different domain)
+#   4. If URL passes, set verified_at to today's date and verified_by to
+#      your GitHub handle or "lead-engineer"
+#   5. If URL fails verification, EITHER find a replacement URL OR change
+#      the resource type to "referral_only" and set url: null
+# ====================================================================
+
+version: 1
+registry_verified_at: null   # set after end-to-end review; null = pending
+
+gaps:
+
+  # ==================================================================
+  # 1. 310T Truck and Coach Technician Certification
+  # ==================================================================
+  - canonical_name: "310T technician certification"
+    aliases:
+      - "310T"
+      - "310T certificate"
+      - "310T certificate of qualification"
+      - "truck and coach technician certificate"
+      - "truck and coach technician certification"
+    category: "credential"
+    description: >-
+      Ontario compulsory trade certification for truck and coach technicians.
+      Required by most heavy-vehicle service employers in the province; earned
+      through an apprenticeship + Skilled Trades Ontario exam.
+    resources:
+      - provider: "Skilled Trades Ontario"
+        type: "credential_pathway"
+        url: "https://www.skilledtradesontario.ca/"            # TODO: verify exact 310T sub-page
+        summary: >-
+          The provincial regulator's pathway for 310T trade certification,
+          including apprenticeship registration and exam scheduling.
+        verified_at: null
+        verified_by: null
+      - provider: "Sault College"
+        type: "apprenticeship"
+        url: "https://www.saultcollege.ca/"                    # TODO: link to truck & coach apprenticeship program page
+        summary: >-
+          Local in-class instruction component of the 310T apprenticeship.
+        verified_at: null
+        verified_by: null
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          Local employment-and-training counsellors who can map your current
+          experience against 310T apprenticeship requirements and help you
+          find a sponsoring employer.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 1b. 310S Automotive Service Technician Certification
+  # ==================================================================
+  # Added 2026-06-08 after live test (meeting_01_310s_automotive_strong)
+  # produced an unguided ask_one_clarifying_question response when the
+  # user asked "how can get 310S licence" -- 310S was not in the
+  # registry, so router Rule 2 (training + entity) could not fire and
+  # Rule 3 (training, no entity) emitted ask_slot=skills_text, which
+  # the responder rendered as a generic skills-intake question.
+  #
+  # Sibling trade to 310T -- same regulator (Skilled Trades Ontario),
+  # same compulsory-trade structure, distinct trade code. The wide
+  # alias set covers the variations the engine has been seen to
+  # surface from job postings ("310S Automotive Technician License")
+  # and the variations a candidate is likely to type.
+  - canonical_name: "310S automotive technician certification"
+    aliases:
+      - "310S"
+      - "310S licence"
+      - "310S license"
+      - "310S certificate"
+      - "310S certificate of qualification"
+      - "310S Automotive Technician License"
+      - "310S automotive technician licence"
+      - "automotive service technician certificate"
+      - "automotive service technician certification"
+      - "automotive service technician licence"
+      - "automotive service technician license"
+    category: "credential"
+    description: >-
+      Ontario compulsory trade certification for automotive service
+      technicians. Required by most automotive repair shops and
+      dealerships in the province; earned through an apprenticeship
+      registered with Skilled Trades Ontario plus the Certificate of
+      Qualification exam.
+    resources:
+      - provider: "Skilled Trades Ontario"
+        type: "credential_pathway"
+        url: "https://www.skilledtradesontario.ca/trade-information/automotive-service-technician/"
+        summary: >-
+          The provincial regulator's 310S trade information page,
+          including apprenticeship registration, training-standard
+          documents, and exam-scheduling pathway.
+        verified_at: null   # 2026-06-08 curl: 200 OK, body contains "310S" 4×, canonical (legacy /trades/ 301s here)
+        verified_by: null
+      - provider: "Sault College"
+        type: "apprenticeship"
+        url: "https://www.saultcollege.ca/programs/apprenticeship/automotive-service-technician"
+        summary: >-
+          Sault College's Automotive Service Technician apprenticeship
+          program -- local in-class instruction component of the 310S
+          apprenticeship.
+        verified_at: null   # 2026-06-08 curl: 200 OK, title "Automotive Service Technician | Sault College"
+        verified_by: null
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          Local employment-and-training counsellors who can map your
+          current automotive experience against 310S apprenticeship
+          requirements and help you find a sponsoring shop or
+          dealership if you don't have one yet.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 2. Class G Driver's License (Ontario passenger vehicle)
+  # ==================================================================
+  - canonical_name: "Class G driver's license"
+    aliases:
+      - "Class G"
+      # 2026-06-15: live shadow logged primary='class g license' from
+      # CP4's canonicalize_skill path, which collapses "Class G driver's
+      # license" -> "class g license". The US-spelling alias below was
+      # missing, so registry.lookup() returned None and surface_url()
+      # was never called. Adding it closes the Class G surfacing gap.
+      - "Class G license"
+      - "Class G licence"
+      - "G license"
+      - "G licence"
+      - "Ontario driver's license"
+      # Slice (2026-06-08): graduated-licence shorthand. Live-test
+      # "how can get this license G2/G" did not match because the
+      # aliases above don't cover the G1/G2/G stage references that
+      # Ontario candidates routinely use. The Class G entry already
+      # describes those stages in its `description`; these aliases let
+      # the message-scan path resolve them to this same canonical gap.
+      - "G2"
+      - "G2 licence"
+      - "G2 license"
+      - "G2/G"
+      - "G2/G licence"
+      - "G2/G license"
+      - "G2/G driver's license"
+      - "G2/G driver's licence"
+      - "G1"
+      - "G1 licence"
+      - "G1 license"
+    category: "license"
+    description: >-
+      Standard Ontario driver's licence for passenger vehicles. Required by
+      many employers for any role involving driving, deliveries, or site
+      visits. Includes the G1 (knowledge), G2 (road test), and full G
+      (advanced road test) stages.
+    resources:
+      - provider: "DriveTest"
+        type: "credential_pathway"
+        url: "https://drivetest.ca/"                           # TODO: deep link to "get your G" page
+        summary: >-
+          Official Ontario driver-testing provider; book the G1 knowledge
+          test and G/G2 road tests here.
+        verified_at: "2026-06-15"
+        verified_by: "lead-engineer"
+      - provider: "Ontario.ca"
+        type: "credential_pathway"
+        url: "https://www.ontario.ca/page/driver-licence"      # TODO: verify slug
+        summary: >-
+          Government overview of Ontario's graduated licensing system, fees,
+          required documents, and exchange-licence policies for newcomers.
+        verified_at: null
+        verified_by: null
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          For newcomers exchanging an out-of-country licence, SCCC can refer
+          you to local driving schools and confirm what documents Ontario
+          requires.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 3. Class A / Class D / Class Z (commercial driver licenses)
+  # ==================================================================
+  - canonical_name: "commercial driver's license"
+    aliases:
+      - "Class A"
+      - "Class A license"
+      - "Class A licence"
+      - "Class D"
+      - "Class D license"
+      - "Class Z"
+      - "Class Z endorsement"
+      - "AZ license"
+      - "AZ"
+      - "DZ"
+      - "air brake endorsement"
+    category: "license"
+    description: >-
+      Ontario commercial driver licences (Class A for tractor-trailers, D for
+      large trucks, with Z endorsement for air-brake-equipped vehicles).
+      Required for most truck-driving and heavy-vehicle roles.
+    resources:
+      - provider: "DriveTest"
+        type: "credential_pathway"
+        url: "https://drivetest.ca/"                           # TODO: deep link to commercial licences page
+        summary: >-
+          Official road-test booking and licence requirements for Class A,
+          D, and Z endorsements.
+        verified_at: null
+        verified_by: null
+      - provider: "Ontario.ca"
+        type: "credential_pathway"
+        url: "https://www.ontario.ca/page/commercial-vehicle-licences"  # TODO: verify slug
+        summary: >-
+          Government overview of Ontario commercial licence classes and
+          their job-eligibility implications.
+        verified_at: null
+        verified_by: null
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC counsellors can recommend local Mandatory Entry-Level
+          Training (MELT) providers for Class A.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 4. WHMIS (Workplace Hazardous Materials Information System)
+  # ==================================================================
+  - canonical_name: "WHMIS"
+    aliases:
+      - "WHMIS 2015"
+      - "WHMIS certification"
+      - "WHMIS training"
+      - "workplace hazardous materials"
+    category: "safety_training"
+    description: >-
+      Mandatory Ontario workplace-safety training for handling controlled
+      products. Most warehouse, manufacturing, healthcare, and trades
+      employers require WHMIS certification before day 1.
+    resources:
+      - provider: "CCOHS"
+        type: "online_course"
+        url: "https://www.ccohs.ca/products/courses/whmis_globally/"   # TODO: verify
+        summary: >-
+          The Canadian Centre for Occupational Health and Safety's official
+          WHMIS 2015 / GHS online certification course.
+        verified_at: null
+        verified_by: null
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/"                    # TODO: link to continuing-ed WHMIS page
+        summary: >-
+          Local in-person WHMIS workshop offered through continuing
+          education; useful when employer requires hands-on certification.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 5. First Aid / CPR
+  # ==================================================================
+  - canonical_name: "first aid and CPR"
+    aliases:
+      - "first aid"
+      - "CPR"
+      - "CPR certification"
+      - "first aid certificate"
+      - "Standard First Aid"
+      - "Emergency First Aid"
+    category: "safety_training"
+    description: >-
+      Standard or Emergency First Aid with CPR — required for many healthcare,
+      childcare, education, fitness, and construction roles. Two-year
+      certification cycle.
+    resources:
+      - provider: "Canadian Red Cross"
+        type: "online_course"
+        url: "https://www.redcross.ca/training-and-certification"   # TODO: verify
+        summary: >-
+          Standard and Emergency First Aid with CPR/AED courses delivered
+          via certified instructors across Ontario.
+        verified_at: null
+        verified_by: null
+      - provider: "St. John Ambulance"
+        type: "local_training"
+        url: "https://sja.ca/"                                 # TODO: link to local SSM training calendar
+        summary: >-
+          First aid and CPR courses with local Sault Ste. Marie delivery.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 6. Forklift Operation
+  # ==================================================================
+  - canonical_name: "forklift certification"
+    aliases:
+      - "forklift"
+      - "forklift operation"
+      - "forklift operator"
+      - "lift truck"
+      - "lift truck operator"
+    category: "safety_training"
+    description: >-
+      Ontario MOL-compliant forklift operator certification, required for
+      warehouse, shipping, and manufacturing roles. Most certifications
+      include classroom + practical evaluation; valid 3 years.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC counsellors can refer you to certified forklift training
+          providers in the Sault Ste. Marie area.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/"                    # TODO: link to forklift training (continuing ed) if offered
+        summary: >-
+          When offered, Sault College continuing education runs forklift
+          certification courses with practical evaluation.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 7. Food Handler / Food Safe
+  # ==================================================================
+  - canonical_name: "food handler certification"
+    aliases:
+      - "food handler"
+      - "food safe"
+      - "food safety"
+      - "food safety certificate"
+    category: "safety_training"
+    description: >-
+      Ontario public-health-recognized food handler certification, required
+      for restaurant, cafeteria, catering, and food-retail roles.
+    resources:
+      - provider: "TrainCan"
+        type: "online_course"
+        url: "https://www.traincan.com/"                       # TODO: verify
+        summary: >-
+          Public-health-recognized online Food Handler certification valid
+          across Ontario.
+        verified_at: null
+        verified_by: null
+      - provider: "Algoma Public Health"
+        type: "local_training"
+        url: "https://www.algomapublichealth.com/"             # TODO: deep link to food-handler training page
+        summary: >-
+          Local public health unit's food-handler training and
+          certification, recognized by Algoma-region employers.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 8. Personal Support Worker (PSW)
+  # ==================================================================
+  - canonical_name: "Personal Support Worker certification"
+    aliases:
+      - "PSW"
+      - "PSW certification"
+      - "PSW certificate"
+      - "personal support worker"
+    category: "credential"
+    description: >-
+      Ontario PSW certification, required for in-home care, long-term care,
+      and assisted-living roles. Typically a 1-year college program.
+    resources:
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/"                    # TODO: link to PSW program page
+        summary: >-
+          Sault College's full PSW program with classroom + clinical
+          placement; one of the standard local pathways into long-term care.
+        verified_at: null
+        verified_by: null
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          Counsellors can advise on PSW funding (Second Career, Better Jobs
+          Ontario) and bridging programs for internationally trained
+          health-care workers.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 9. Microsoft Excel
+  # ==================================================================
+  - canonical_name: "Microsoft Excel"
+    aliases:
+      - "Excel"
+      - "MS Excel"
+      - "spreadsheets"
+      - "excel skills"
+    category: "skill"
+    description: >-
+      Microsoft Excel competence — formulas, pivot tables, basic data
+      analysis. Required by many admin, accounting, and analyst roles.
+    resources:
+      - provider: "Microsoft Learn"
+        type: "online_course"
+        url: "https://learn.microsoft.com/en-us/training/browse/?products=office"   # TODO: deep link to Excel learning path
+        summary: >-
+          Microsoft's free official Excel training and certification path
+          (Microsoft Office Specialist — Excel).
+        verified_at: null
+        verified_by: null
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/specializations/excel"  # TODO: verify
+        summary: >-
+          Macquarie University's "Excel Skills for Business" specialization
+          on Coursera (free to audit, paid for certificate).
+        verified_at: null
+        verified_by: null
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/"                    # TODO: link to continuing-ed Excel offerings
+        summary: >-
+          Continuing education Excel modules when in-person learning fits
+          better.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 10. Microsoft Office (general productivity)
+  # ==================================================================
+  - canonical_name: "Microsoft Office"
+    aliases:
+      - "MS Office"
+      - "Office 365"
+      - "Word"
+      - "Microsoft Word"
+      - "PowerPoint"
+      - "Outlook"
+    category: "skill"
+    description: >-
+      General Microsoft Office competence — Word, Excel, PowerPoint, Outlook.
+      Foundational for admin, customer-service, and most office roles.
+    resources:
+      - provider: "Microsoft Learn"
+        type: "online_course"
+        url: "https://learn.microsoft.com/en-us/training/browse/?products=office"
+        summary: >-
+          Microsoft's free official training across the Office suite, with
+          certification paths via Microsoft Office Specialist (MOS).
+        verified_at: null
+        verified_by: null
+      - provider: "Northland Adult Learning Centre"
+        type: "local_training"
+        url: "https://northland-ssm.ca/"                       # TODO: verify domain
+        summary: >-
+          Local newcomer-focused essential-skills programming, including
+          basic computer and Office training.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 11. QuickBooks / Basic Accounting
+  # ==================================================================
+  - canonical_name: "QuickBooks and basic accounting"
+    aliases:
+      - "QuickBooks"
+      - "bookkeeping"
+      - "basic accounting"
+      - "accounting software"
+    category: "skill"
+    description: >-
+      QuickBooks proficiency and foundational bookkeeping — required for
+      junior accounting, bookkeeping, and small-business admin roles.
+    resources:
+      - provider: "Intuit (QuickBooks)"
+        type: "online_course"
+        url: "https://www.intuit.com/training/"                # TODO: verify
+        summary: >-
+          Intuit's free official QuickBooks training and certification
+          (QuickBooks Online ProAdvisor track).
+        verified_at: null
+        verified_by: null
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/"                    # TODO: link to accounting / business administration page
+        summary: >-
+          Sault College's Business Administration and Accounting programs
+          cover bookkeeping fundamentals.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 12. Customer Service
+  # ==================================================================
+  - canonical_name: "customer service"
+    aliases:
+      - "customer service skills"
+      - "customer care"
+      - "client services"
+      - "client-facing"
+    category: "skill"
+    description: >-
+      Foundational customer-service competence — communication, conflict
+      resolution, point-of-sale, professional behaviour. Required by retail,
+      hospitality, and service-industry roles.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC offers job-readiness workshops covering customer-service
+          fundamentals for entry-level retail and hospitality.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/learn/customer-service"  # TODO: verify
+        summary: >-
+          CVS Health's free "Customer Service" course on Coursera; broad
+          fundamentals applicable across industries.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 13. CompTIA / IT Support
+  # ==================================================================
+  - canonical_name: "CompTIA IT support certification"
+    aliases:
+      - "CompTIA"
+      - "CompTIA A+"
+      - "A+"
+      - "IT support"
+      - "help desk"
+      - "Google IT Support"
+    category: "credential"
+    description: >-
+      Entry-level IT-support credentials — CompTIA A+ (vendor-neutral) or
+      Google IT Support Certificate (entry-level help desk). Required by
+      junior IT, help-desk, and desktop-support roles.
+    resources:
+      - provider: "CompTIA"
+        type: "credential_pathway"
+        url: "https://www.comptia.org/certifications/a"        # TODO: verify
+        summary: >-
+          CompTIA's official A+ certification page — vendor-neutral IT
+          foundations exam, recognized across IT employers.
+        verified_at: null
+        verified_by: null
+      - provider: "Google Career Certificates"
+        type: "online_course"
+        url: "https://grow.google/certificates/it-support/"    # TODO: verify
+        summary: >-
+          Google's IT Support Professional Certificate on Coursera — entry-
+          level, ~6 months part-time, no degree required.
+        verified_at: null
+        verified_by: null
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/"                    # TODO: link to IT / Computer Studies programs
+        summary: >-
+          Local in-person Computer Studies and IT support diploma programs.
+        verified_at: null
+        verified_by: null

@@ -1,0 +1,32 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+data/*.csv
+!data/.gitkeep
+data/partner_uploads/
+.DS_Store
+*.log
+
+# Test-output review directories
+.pytest_tmp_*/
+.pytest-codex-*/
+.pytest-tmp-*/
+.codex-pytest-*/
+.tmp_pytest_*/
+
+# Local dev/inspection scripts created during 2026-06-16 debugging
+check_jobs.py
+check_dataset.py
+check_raw.py
+check_raw_jobs.py
+refresh_active.py
+
+# Editor / harness state
+.claude/
+shadow.log

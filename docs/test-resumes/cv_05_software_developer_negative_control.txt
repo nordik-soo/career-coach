@@ -1,0 +1,43 @@
+SYNTHETIC TEST RESUME - NOT A REAL PERSON
+
+Candidate: Software Developer and Data Analyst
+Location: Sault Ste. Marie, Ontario
+Target role: Software Developer, Data Analyst, or AI Systems role
+Work preference: Full-time, hybrid or in-person in Sault Ste. Marie
+
+SUMMARY
+Software developer and data analyst with experience building web applications, APIs, dashboards, machine learning workflows, and database-backed tools. Strong technical background in Python, JavaScript, TypeScript, React, Next.js, FastAPI, SQL, PostgreSQL, data visualization, ETL, machine learning, and cloud deployment. This resume is a negative-control test: it should not be forced into unrelated trades, hotel, or social-service jobs as a strong match.
+
+WORK HISTORY
+
+Data Analyst
+Telus International, Remote / Sault Ste. Marie, ON
+2023 to present
+- Build SQL queries, Python scripts, and dashboards to monitor data quality and operational performance.
+- Clean, transform, and validate datasets using Python, pandas, SQL, and spreadsheet tools.
+- Create reports and visualizations for operations teams using Power BI and Excel.
+- Support machine learning evaluation workflows, annotation quality checks, and process documentation.
+
+Full Stack Developer
+Independent Projects, Sault Ste. Marie, ON
+2021 to present
+- Built web applications with React, Next.js, TypeScript, Tailwind CSS, FastAPI, PostgreSQL, and REST APIs.
+- Designed authentication flows, dashboard screens, data tables, file-upload workflows, and admin tools.
+- Developed resume parsing prototypes, job matching demos, and automated data-ingestion scripts.
+- Used Git, GitHub, Docker, Linux, and cloud deployment workflows.
+
+Research Assistant
+University of Saskatchewan
+2020 to 2022
+- Applied Python, R, statistics, and machine learning libraries including scikit-learn and PyTorch to research datasets.
+- Prepared technical reports, reproducible notebooks, and visualizations for academic and project stakeholders.
+
+EDUCATION
+Master of Science, Biomedical Engineering
+University of Saskatchewan, 2022
+
+Bachelor of Science, Computer Science
+International University, 2018
+
+SKILLS
+Python, JavaScript, TypeScript, React, Next.js, FastAPI, REST APIs, SQL, PostgreSQL, pandas, NumPy, scikit-learn, PyTorch, machine learning, data analysis, data visualization, Power BI, Excel, ETL, dashboards, Docker, Git, GitHub, Linux, cloud deployment, API integration, web applications, full stack development, software development, database design, technical documentation, statistics, research analysis.
