@@ -3067,3 +3067,180 @@ def test_resolver_returns_none_when_all_work_history_suppressed():
     }
     sp.suppressed_fact_ids = ["wh-1", "wh-2"]
     assert handler._resolve_target_role_anaphor("same role", sp) is None
+
+
+# ===========================================================================
+# Slice A2-α3 (2026-06-18) -- bare-yes ambiguity guard
+# ===========================================================================
+# When two or more formal pending flags are simultaneously awaiting a
+# yes/no response, a bare yes is ambiguous and the existing per-flag
+# clearing code would consume the first matching flag's branch
+# regardless of which question the user is actually answering. A2-α3
+# intercepts these turns with a soft re-ask. The 0-pending and
+# 1-pending cases are NOT intercepted (verified by the negative
+# tests below).
+_A2_DISAMBIGUATION_PHRASE = (
+    "I want to make sure I'm answering the right question"
+)
+
+
+def _stage_with_pending(
+    *,
+    credential: bool = False,
+    adjacent_offer: bool = False,
+    training_topic: bool = False,
+    adjacent_search_offer: bool = False,
+) -> StagedProfile:
+    """Build a staged profile pre-loaded with the requested pending
+    flags. Used to exercise A2-α3's entry-time count."""
+    sp = _staged(
+        session_id="a2-test", message_count=5,
+        target_role_text="accounting clerk",
+    )
+    if credential:
+        sp.pending_credential_confirmation = {
+            "canonical": "Class G", "action": "add",
+        }
+    sp.pending_adjacent_offer = adjacent_offer
+    sp.pending_training_topic = training_topic
+    sp.pending_adjacent_search_offer = adjacent_search_offer
+    return sp
+
+
+def test_a2_intercepts_bare_yes_when_two_pending_flags_active(monkeypatch):
+    """A2-α3 fires: 2 formal pending flags awaiting a yes/no AND
+    the message is a bare confirming response. The response is the
+    soft re-ask; pending flags are PRESERVED on the saved staged so
+    next turn's existing routing can resolve them."""
+    staged = _stage_with_pending(credential=True, adjacent_offer=True)
+    extractor_spy, _, planner_calls = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+
+    response = handler.handle_anonymous(
+        message="yes", session_id=staged.session_id,
+    )
+
+    assert response is not None
+    assert _A2_DISAMBIGUATION_PHRASE in response["reply"], (
+        f"Expected A2-α3 disambiguation phrase in reply, got: "
+        f"{response['reply']!r}"
+    )
+    # Pending flags MUST stay set so the user's next clarifying message
+    # routes through the existing per-flag handlers.
+    assert staged.pending_credential_confirmation is not None
+    assert staged.pending_adjacent_offer is True
+    # No extractor / planner work -- intercept happens before either.
+    assert extractor_spy.calls == 0
+    assert len(planner_calls) == 0
+
+
+def test_a2_intercepts_bare_yes_with_three_pending_flags(monkeypatch):
+    """Same logic as above with three flags active. Tests the >= 2
+    boundary."""
+    staged = _stage_with_pending(
+        credential=True, adjacent_offer=True, training_topic=True,
+    )
+    extractor_spy, _, _ = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+
+    response = handler.handle_anonymous(
+        message="alright", session_id=staged.session_id,
+    )
+
+    assert _A2_DISAMBIGUATION_PHRASE in response["reply"]
+    assert extractor_spy.calls == 0
+
+
+def test_a2_does_NOT_intercept_when_only_one_pending_flag(monkeypatch):
+    """Single pending flag is UNAMBIGUOUS. A2-α3 must NOT intercept --
+    the existing per-flag handler (e.g. _classify_pattern_2_reply at
+    handler.py:4118) consumes the yes / no / other reply with its own
+    semantics. This is the locked behavior contract."""
+    staged = _stage_with_pending(adjacent_search_offer=True)
+    extractor_spy, _, _ = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+
+    response = handler.handle_anonymous(
+        message="yes", session_id=staged.session_id,
+    )
+
+    assert _A2_DISAMBIGUATION_PHRASE not in response["reply"], (
+        "A2-α3 must NOT intercept when exactly one pending flag is "
+        "active -- the existing per-flag classifier handles it."
+    )
+    # Existing pattern-2 consume hook should have cleared the flag.
+    assert staged.pending_adjacent_search_offer is False
+
+
+def test_a2_does_NOT_intercept_when_zero_pending_flags(monkeypatch):
+    """Critical: this test pins the locked decision NOT to touch the
+    0-pending bare yes case. James's session Turn 1 ("alright" + 0
+    pending) routes through normal planner+arbiter and gets the
+    target ASK from A1. A2-α3 must not disrupt that path."""
+    staged = _stage_with_pending()  # all flags False
+    extractor_spy, _, planner_calls = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+
+    response = handler.handle_anonymous(
+        message="alright", session_id=staged.session_id,
+    )
+
+    assert _A2_DISAMBIGUATION_PHRASE not in response["reply"]
+    # Normal flow ran: extractor + planner were invoked.
+    assert extractor_spy.calls >= 1
+    assert len(planner_calls) >= 1
+
+
+def test_a2_does_NOT_intercept_substantive_message_with_two_pending_flags(
+    monkeypatch,
+):
+    """The bare-yes guard requires intent in the yes/no family AND a
+    short message. A substantive message ("looking for accounting
+    jobs") fails the bare check even when 2 pending flags are
+    active -- the user is restating intent, not answering yes/no."""
+    staged = _stage_with_pending(credential=True, adjacent_offer=True)
+    extractor_spy, _, planner_calls = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+
+    response = handler.handle_anonymous(
+        message="actually I'm looking for accounting jobs in town",
+        session_id=staged.session_id,
+    )
+
+    assert _A2_DISAMBIGUATION_PHRASE not in response["reply"]
+    assert extractor_spy.calls >= 1
+    assert len(planner_calls) >= 1
+
+
+def test_a2_skipped_when_uploaded_file_is_present(monkeypatch):
+    """A file upload is a strong user action that supersedes
+    message-level ambiguity. A2-α3 must not block the upload
+    pipeline even if 2 pending flags are active and the user typed
+    a bare 'yes' alongside the upload."""
+    staged = _stage_with_pending(credential=True, adjacent_offer=True)
+    extractor_spy, _, _ = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+    # Stub the resume-upload pipeline to a benign no-op so the
+    # handler can complete without touching the real parser.
+    monkeypatch.setattr(
+        handler, "_apply_resume_upload",
+        lambda staged, file_bytes, filename: None,
+    )
+
+    response = handler.handle_anonymous(
+        message="yes",
+        session_id=staged.session_id,
+        file_bytes=b"%PDF-1.4 fake bytes",
+        filename="test.pdf",
+    )
+
+    assert _A2_DISAMBIGUATION_PHRASE not in response["reply"], (
+        "A2-α3 must skip when uploaded_file=True -- file upload "
+        "supersedes message-level ambiguity."
+    )

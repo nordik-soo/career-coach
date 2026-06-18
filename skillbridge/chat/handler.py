@@ -4057,6 +4057,90 @@ def _final_move_to_legacy_action(move: str) -> str:
 
 
 # =========================================================================
+# Slice A2-α3 (2026-06-18): bare-yes ambiguity guard
+# =========================================================================
+# When the user replies with a bare yes/no but TWO OR MORE formal
+# pending flags are simultaneously awaiting that response, the
+# existing per-flag clearing code at the top of handle_anonymous
+# would consume the first matching flag's `if` branch -- regardless
+# of which question the user is actually answering. That's a hidden
+# routing decision. A2-α3 short-circuits these turns with a soft
+# re-ask BEFORE any pending-flag mutation, so the user's clarifying
+# next message routes deterministically through existing per-flag
+# handlers.
+#
+# Scope (locked with Nazmul 2026-06-18):
+#   - Intercepts ONLY when entry pending_count >= 2 AND message is
+#     bare yes/no/confirming-style. The 0-pending case is NOT
+#     intercepted; existing routing handles natural "alright" /
+#     "yes" replies to coach prose where there's an implicit
+#     conversational frame.
+#   - Skipped when uploaded_file is True: a file upload is a strong
+#     user action that supersedes message-level ambiguity.
+#   - Does NOT mutate staged. Pending flags stay set so the next
+#     turn's existing routing can resolve them. `staged.touch()` +
+#     `store.save(staged)` ARE called so message_count and timestamps
+#     stay consistent.
+_BARE_YES_NO_INTENTS: frozenset[str] = frozenset({
+    "confirming", "declining", "impatient_proceed",
+})
+_BARE_MESSAGE_MAX_WORDS = 4  # "yes", "no", "alright", "yes please",
+                              # "go ahead", "sure thing", "not now"
+
+
+def _is_bare_yes_no_response(message: str, intent: str) -> bool:
+    """True when the message is a short yes/no-style response. The
+    intent guard rejects long messages with substantive content even
+    if they happen to start with "yes"."""
+    if intent not in _BARE_YES_NO_INTENTS:
+        return False
+    return len((message or "").strip().split()) <= _BARE_MESSAGE_MAX_WORDS
+
+
+def _count_entry_pending_flags(staged: StagedProfile) -> int:
+    """Counts the four formal pending fields on staged. Called at
+    handle_anonymous entry, BEFORE any clearing code runs. Same
+    counting logic as turn_state._collect_pending_flags (Slice B);
+    duplicated here to keep A2-α3 independent of Slice B per the
+    locked decision not to thread DerivedTurnState through the
+    handler lifecycle yet."""
+    count = 0
+    if staged.pending_credential_confirmation is not None:
+        count += 1
+    if staged.pending_adjacent_offer:
+        count += 1
+    if staged.pending_training_topic:
+        count += 1
+    if staged.pending_adjacent_search_offer:
+        count += 1
+    return count
+
+
+def _ambiguous_yes_response(
+    session_id: str, staged: StagedProfile,
+) -> dict[str, Any]:
+    """Build the A2-α3 short-circuit response. Preserves current
+    intake_state and pending flags so the next turn's existing
+    routing resolves cleanly. The reply phrasing is a soft re-ask
+    that does NOT enumerate internal flag names (coach voice,
+    no leaking of internal state)."""
+    return {
+        "reply": (
+            "I want to make sure I'm answering the right question — "
+            "can you say a bit more about what you'd like to do next?"
+        ),
+        "profile_id": None,
+        "session_id": session_id,
+        "intake_state": staged.intake_state,
+        "asked_slots": [],
+        "next_action": intake_state.ACTION_ASK_QUESTIONS,
+        "recommended_jobs": [],
+        "next_skill_suggestion": None,
+        "requires_consent": True,
+    }
+
+
+# =========================================================================
 # ANONYMOUS PATH — no DB writes for user data
 # =========================================================================
 def handle_anonymous(
@@ -4089,6 +4173,25 @@ def handle_anonymous(
         sid = store.new_session() if not session_id else session_id
         loaded = store.load(sid)
         staged = loaded if loaded is not None else StagedProfile.new(sid)
+
+    # Slice A2-α3 (2026-06-18): bare-yes ambiguity guard. Runs BEFORE
+    # any pending-flag clearing. Skipped on resume uploads (the file
+    # action supersedes message-level ambiguity). See the helper-block
+    # comment above for the full rationale + locked scope.
+    if not uploaded_file:
+        entry_pending_count = _count_entry_pending_flags(staged)
+        if entry_pending_count >= 2:
+            from skillbridge.chat.truth_summary import _classify_intent
+            entry_intent = _classify_intent(message or "")
+            if _is_bare_yes_no_response(message or "", entry_intent):
+                log.info(
+                    "anon_chat session=%s a2_intercept=ambiguous_yes "
+                    "pending_count=%d intent=%s",
+                    staged.session_id[:8], entry_pending_count, entry_intent,
+                )
+                staged.touch()
+                new_session_id = store.save(staged)
+                return _ambiguous_yes_response(new_session_id, staged)
 
     # AR-1: soft-offer save-and-clear. Runs IMMEDIATELY after session load
     # and BEFORE every downstream short-circuit (resume-upload review,
