@@ -321,6 +321,20 @@ class StagedProfile:
     # per-session one).
     resume_upload_offered: bool = False
 
+    # Pattern 2 two-turn flag (closing-matrix v2, LOCKED 2026-06-17).
+    # Set True on Turn N when the Pattern 2 closing fires — the LLM
+    # has just asked "want me to also look at related roles your
+    # skills fit?" and we expect the user to respond yes / no /
+    # something-else on Turn N+1. Consumed by the planner / handler
+    # on the next turn to route a yes-like reply into the CP5
+    # adjacency search (= Sideways infrastructure reuse, Step 8) and
+    # clear the flag on any other reply.
+    #
+    # Reset to False on target_role_text change via __setattr__: a
+    # role switch invalidates any pending consent for the prior
+    # target's offer. Same pattern as resume_upload_offered.
+    pending_adjacent_search_offer: bool = False
+
     # ----------------------------------------------- attribute interception
     def __setattr__(self, name: str, value: Any) -> None:
         """Invalidate cached target_noc when target_role_text changes.
@@ -361,6 +375,13 @@ class StagedProfile:
                 # A user who ignored the offer for the prior target can
                 # hear it again for the new target.
                 self.__dict__["resume_upload_offered"] = False
+                # Pattern 2 pending-consent (closing-matrix v2,
+                # 2026-06-17): target switch invalidates any pending
+                # "want me to look at related roles?" consent — the
+                # prior question was about the prior target's
+                # adjacencies. Same per-target lifecycle as
+                # resume_upload_offered.
+                self.__dict__["pending_adjacent_search_offer"] = False
         # Fresh-intake-on-target-change pillar (2026-06-15) — stamp
         # experience alignment on ANY non-empty experience_text
         # assignment. Catching this here (not just in merge_fields)

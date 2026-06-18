@@ -207,6 +207,64 @@ def _detect_explicit_development_intent(user_message: str | None) -> bool:
     return any(kw in lower for kw in _DEVELOPMENT_INTENT_KEYWORDS)
 
 
+def compute_primary_gap_name(
+    *,
+    staged: "StagedProfile",
+    user_message: str | None,
+    truth_enough_to_match: bool,
+    truth_usable_evidence_present: bool,
+    engine_completed: bool,
+    in_memory_matches: list["MatchResult"],
+    skill_adjacent_results: list | None,
+    snapshot_usable: bool,
+    target_posting_count: int | None,
+) -> str | None:
+    """Run CP4's diagnose + plan and return the primary
+    recommendation's canonical skill name, or None if CP4 cannot
+    form a recommendation (or any step raises).
+
+    Step 11h, 2026-06-17, closing-matrix v2: this is the responder-
+    facing entry point — distinct from `emit_shadow_trace` which
+    logs telemetry but discards the plan. The handler calls this
+    BEFORE compose_response_v2 on present_no_match turns so the LLM
+    happy path (MOVEMENT C2 in OUTCOME_RESPONDER_PROMPT) and the
+    deterministic fallback (`_present_no_match_fallback_v2`) can
+    BOTH quote the gap name verbatim.
+
+    Defensive: ALL exceptions return None so the responder path is
+    never broken by a CP4 anomaly (same try/except posture as
+    `emit_shadow_trace`).
+    """
+    try:
+        from skillbridge.chat.inventory_diagnosis import diagnose
+        diagnosis = diagnose(
+            enough_to_match=truth_enough_to_match,
+            usable_evidence_present=truth_usable_evidence_present,
+            engine_completed=engine_completed,
+            snapshot_usable=snapshot_usable,
+            direct_match_results=in_memory_matches,
+            skill_adjacent_results=skill_adjacent_results or [],
+            target_posting_count=target_posting_count,
+        )
+        if diagnosis.outcome not in ("PREPARATION_GAP", "READY_TO_APPLY"):
+            return None
+        explicit_request = _detect_explicit_development_intent(user_message)
+        result = compute_development_plan(
+            diagnosis=diagnosis,
+            in_memory_matches=in_memory_matches,
+            staged=staged,
+            user_explicit_development_request=explicit_request,
+        )
+        if result is None:
+            return None
+        plan, _trace = result
+        if plan.primary_recommendation is None:
+            return None
+        return plan.primary_recommendation.skill_canonical_name
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def emit_shadow_trace(
     *,
     staged: "StagedProfile",

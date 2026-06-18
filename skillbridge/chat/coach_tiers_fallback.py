@@ -57,11 +57,22 @@ _STRENGTH_PHRASES: dict[str, str] = {
 # fallback at least stays grounded.
 
 
-_HEADER_APPLY_TODAY = "**Apply today — your skills line up**"
-# Fix 1 (post-step-10 review): a job may have multiple required gaps;
-# the heading was previously singular ("one gap") which misrepresented
-# multi-gap records.
-_HEADER_WORTH_A_TRY = "**Worth a try — close, with gaps to address**"
+# scoring-v6 (2026-06-17): heading rename — see closing-matrix v2 memory.
+# The previous strings "**Apply today — your skills line up**" and
+# "**Worth a try — close, with gaps to address**" were replaced with
+# the 4-label vocabulary. The CONSTANT NAMES are kept (call sites
+# elsewhere in this file remain unchanged) — only the user-facing
+# strings updated to align with the new prompt headings.
+# Two NEW constants — _HEADER_GOOD_MATCH and _HEADER_EXPLORE_LATER —
+# are introduced for the two newly-distinct labels. The fallback
+# renderer's per-tier render functions don't yet split Strong vs
+# Good or surface Explore-later separately — that's a follow-on
+# (the fallback degradation is acceptable; the LLM happy-path is
+# the canonical path).
+_HEADER_APPLY_TODAY = "**Strong match — apply today**"
+_HEADER_GOOD_MATCH = "**Good match — solid fit**"
+_HEADER_WORTH_A_TRY = "**Stretch — reachable with prep**"
+_HEADER_EXPLORE_LATER = "**Explore later — not your main target**"
 _HEADER_SIDEWAYS = "**Sideways move — same skills, different angle**"
 
 

@@ -433,37 +433,135 @@ def _extract(message: str, *, asked_slots: list[str]) -> chat_extractor.Extracti
     return result
 
 
+def _blank_direct_tiers_for_pattern_2(tier_evidence):
+    """Pattern 2 yes-consent display projection (Step 8 / 2026-06-17).
+
+    When the user consents to the related-roles offer ("yes" to
+    "want me to also look at related roles?"), the next turn must
+    surface ONLY the Sideways tier — the user already saw their
+    direct-target matches on the prior turn; this turn is the
+    related-roles pivot they requested.
+
+    Returns a new `TieredEvidence` with the direct-target tiers
+    (apply_today, worth_a_try, explore_later) blanked and
+    sideways_move preserved. This routes through the existing
+    arbiter logic exactly like Pattern 3's auto-fire path —
+    `_tier_evidence_has_any_records` stays True iff sideways_move
+    has records, so the arbiter still chooses
+    `present_tiered_matches`. The responder then sees a tier
+    bundle with only Sideways populated and the prompt's
+    PATTERN 3 rule kicks in for framing.
+
+    If sideways_move is ALSO empty (no related roles found for
+    this user's profile), the blanked TieredEvidence has all four
+    tiers empty. `_tier_evidence_has_any_records` returns False
+    and the handler falls back to `present_no_match` — which Step 9
+    will enhance with the SSM market summary as the terminal anchor.
+    """
+    from skillbridge.chat.tiered_evidence import TieredEvidence
+
+    return TieredEvidence(
+        apply_today=(),
+        worth_a_try=(),
+        sideways_move=tier_evidence.sideways_move,
+        explore_later=(),
+    )
+
+
+def _classify_pattern_2_reply(message: str) -> str:
+    """Pattern 2 consent classifier (closing-matrix v2, Step 7b /
+    Step 11b refactor, 2026-06-17).
+
+    Classifies the user's reply to a Pattern 2 closing question
+    ("want me to also look at related roles?") into one of:
+      - "yes":   user consented; Step 8's blanking hook fires
+      - "no":    user declined; conversation ends naturally
+      - "other": user changed topic / asked a question / corrected
+                 something — clear the flag, route normally
+
+    Implementation note (Step 11b, 2026-06-17): the v1 of this
+    classifier used a locked frozenset of exact-match replies
+    ("yes", "yes please", "go ahead", ...) plus a brittle
+    normalization (`strip().lower().rstrip(".!?,")`). Live verify
+    on 2026-06-17 showed the failure: a user typing "yes. go ahead"
+    classifies as "other" because the trailing rstrip doesn't chew
+    the period AFTER "yes" — and "yes. go ahead" isn't in the
+    locked set as a whole.
+
+    Fix: delegate to the existing `_classify_intent` regex
+    classifier in `truth_summary`, which has been battle-tested on
+    the same kinds of natural-language replies via the planner
+    layer. It correctly identified "yes. go ahead" as
+    `impatient_proceed`. Reusing it gives:
+      - zero new vocabulary maintenance (single source of truth)
+      - free upgrades when the intent classifier improves
+      - no risk of two classifiers disagreeing on the same message
+
+    Signal → consent mapping (locked):
+      confirming         → yes  ("yes", "alright", "looks good")
+      impatient_proceed  → yes  ("go ahead", "show me", "just do it")
+      declining          → no   ("no", "skip", "not now")
+      asking_question    → other (user asked something else)
+      asking_about_gap   → other (user asked about a skill gap)
+      correcting         → other (user pivoted: "actually, ...")
+      redirecting        → other (user changed topic)
+      neutral            → other (no strong signal)
+    """
+    # Lazy import — consistent with the file's other cross-module
+    # imports; no actual circular here.
+    from skillbridge.chat.truth_summary import _classify_intent
+
+    if not isinstance(message, str):
+        return "other"
+    intent = _classify_intent(message)
+    if intent in ("confirming", "impatient_proceed"):
+        return "yes"
+    if intent == "declining":
+        return "no"
+    return "other"
+
+
 def _should_offer_resume_upload(
     *, staged, final_move: str, band_signal: str,
 ) -> bool:
-    """Resume-upload offer gate (2026-06-16, user-signed-off).
+    """Resume-upload offer gate (Pattern 1 — closing-matrix v2,
+    2026-06-17 LOCKED).
 
-    Locked product rule (no-final-no-without-resume, 2026-06-16):
-        The system NEVER gives a closing "no jobs found" decision until
-        either (a) a strong match surfaces, or (b) a resume has been
-        uploaded so we've seen the user's full picture. Every no-match
-        turn without a resume is therefore an INVITATION to continue —
-        more skills here or a CV upload — not a closing statement.
+    Foundational principle (locked):
+        [[project-user-always-gets-something]] — the system never ends
+        a turn empty-handed when it could give a meaningful next step.
+        Pattern 1 is the no-resume implementation of that principle:
+        if the user hasn't uploaded a resume, the closing of any tier
+        or no-match turn is a universal invitation to upload — framed
+        as "so I can look at related roles your skills also fit"
+        (broadening), NOT "to find a stronger match" (terminating).
 
-    Fires when BOTH conditions hold:
-      1. The final_move is `present_no_match` OR `band_signal` is
-         "low_only" / "stretch_only" (the engine couldn't surface a
-         strong/good match).
-      2. No resume has been uploaded this session (resume_facts_json
-         is None or empty).
+    Pattern 1 fires when:
+      - No resume has been uploaded this session (resume_facts_json
+        is None or empty).
 
-    Note (2026-06-16): the prior "once per target" gate (checking
-    `staged.resume_upload_offered`) was DROPPED. Iterative-ask is now
-    the default no-match shape — the LLM happy-path varies phrasing
-    turn-by-turn so the user doesn't feel pestered. The flag is left
-    on StagedProfile for audit / telemetry but is no longer consulted
-    here. Honest final close (legitimate "no" with SCCC referral) is
-    reached only via `resume_facts_json` being set — that's the
-    discriminator the LLM prompt reads on present_no_match turns.
+    That's it. The earlier v1 gate also required `final_move ==
+    present_no_match` OR `band_signal in {low_only, stretch_only}`,
+    so a Strong/Good match with no resume would fall through to
+    either the (now-deleted) action closing or the generic fallback —
+    neither of which offered the user broadening. Under the locked
+    user-always-gets-something principle, those paths were wrong:
+    the system never pushes a no-resume user toward "go apply"; it
+    keeps offering more service via the upload entitlement.
+
+    band_signal and final_move arguments are RETAINED in the
+    signature (no caller changes) but no longer read by the gate.
+    They're kept for telemetry / debug consistency and because
+    Pattern 2 / Pattern 3 logic (resume + match → CP5 offer; resume
+    + 0 match → auto-fire CP5) will be wired in separate handlers
+    that read these signals — they should stay on the call shape.
+
+    Note: the prior "once per target" gate
+    (`staged.resume_upload_offered`) was DROPPED in 2026-06-16. The
+    flag is left on StagedProfile for audit / telemetry but is not
+    consulted here. The LLM happy-path varies phrasing turn-by-turn
+    so the user doesn't feel pestered.
     """
-    LOW_BAND_SIGNALS = {"low_only", "stretch_only"}
-    if final_move != "present_no_match" and band_signal not in LOW_BAND_SIGNALS:
-        return False
     if staged.resume_facts_json:
         return False
     return True
@@ -539,6 +637,62 @@ def _is_likely_slot_answer(message: str, asked_slots: list[str]) -> bool:
         return False
     token_count = len(message.strip().split())
     return token_count <= _SLOT_ANSWER_MAX_TOKENS
+
+
+def _maybe_recover_skills_text_slot(
+    *,
+    staged: "StagedProfile",
+    extraction: "chat_extractor.ExtractionResult",
+    message: str,
+) -> bool:
+    """Back-fill `staged.skills_text` when the extractor dropped the
+    slot-level value as ungrounded BUT individual skills from the same
+    message grounded successfully.
+
+    Why this exists (2026-06-17 live repro): the LLM extractor returns
+    BOTH a `skills_text` slot field (with its own verbatim-evidence
+    requirement) AND a per-skill list (with per-item evidence). The
+    slot-level evidence is more brittle — Haiku tends to paraphrase
+    or consolidate when summarizing what the user said, so the
+    substring grounding check rejects the slot even when individual
+    skills ground cleanly.
+
+    On the live accounting-clerk turn, the user explicitly listed 12
+    real skills. The per-skill grounding passed 12/12. But the slot-
+    level skills_text was dropped (`raw_keys_dropped=['ungrounded:
+    skills_text']`), leaving `staged.skills_text` empty. Change C's
+    `skills_text_present` guard then read False and `enough_to_match`
+    stayed False — so the engine refused to run and the user was
+    re-asked despite having just listed real skills.
+
+    The recovery only fires when ALL of these hold:
+      1. The extractor signalled "user was listing skills" by
+         attempting to fill skills_text (presence of
+         'ungrounded:skills_text' in raw_keys_dropped). Phantom-skill
+         messages ("Completed Truck and Coach apprenticeship at Sault
+         College") do NOT trigger this because the extractor doesn't
+         claim the user was listing skills in pure experience prose.
+      2. >=3 per-skill items from THIS turn's extraction grounded
+         successfully. This is stronger evidence than the cumulative
+         chat_skill_count gate — we're asserting the CURRENT MESSAGE
+         contained real skill claims, not pulling forward old state.
+      3. `staged.skills_text` is currently empty. Recovery never
+         overwrites a prior turn's slot value.
+
+    Returns True iff staged.skills_text was filled by this call.
+    """
+    if "ungrounded:skills_text" not in extraction.raw_keys_dropped:
+        return False
+    if len(extraction.skills) < 3:
+        return False
+    existing = getattr(staged, "skills_text", None)
+    if isinstance(existing, str) and existing.strip():
+        return False
+    msg_stripped = message.strip()
+    if len(msg_stripped) < 3:
+        return False
+    staged.skills_text = msg_stripped[:500]
+    return True
 
 
 def _closed_vocab_reply(slot: str, message: str) -> str | None:
@@ -772,6 +926,27 @@ def _maybe_append_soft_offer(
     # turns (the lifecycle clear there would otherwise hide the
     # empty snapshot from any direct snapshot peek done here).
     if prior_empty_adjacency:
+        return reply
+
+    # Step 11f + 11l (closing-matrix v2): suppress the AR-6b soft
+    # offer ("If you'd like, I can also look for related roles...
+    # just say what other roles?") on EVERY present_no_match turn,
+    # regardless of resume state.
+    #
+    # Step 11f rationale (resume + present_no_match): the LLM's
+    # response already acknowledges that the related-role search ran
+    # via the RELATED_ROLES_EXHAUSTED prompt rule. Appending the
+    # soft-offer creates an infinite-offer loop.
+    #
+    # Step 11l rationale (no-resume + present_no_match, 2026-06-18):
+    # the OUTCOME_RESPONDER_PROMPT SHAPE 1 closing IS the Pattern 1
+    # upload ask, framed around finding related roles. The AR-6b
+    # soft-offer line then says "or say what other roles?" — two
+    # offers competing for the user's attention, exactly the
+    # "splits attention" anti-pattern Pattern 1's structural rules
+    # forbid. Suppressing AR-6b here lets Pattern 1's upload ask
+    # remain the single closing pivot.
+    if getattr(final, "final_move", None) == "present_no_match":
         return reply
 
     from skillbridge.match.adjacent import (
@@ -1593,6 +1768,7 @@ def _try_v2_path(
     resume_info: dict[str, Any] | None,
     store,
     pending_adjacent_offer: bool = False,
+    pattern_2_consent: str | None = None,
 ) -> dict[str, Any] | None:
     """v2 dispatch entry. Returns either a complete response dict (v2
     fully handled the turn) or None (explicit fallback_to_legacy
@@ -2047,14 +2223,87 @@ def _try_v2_path(
             )
             if _tier_evidence_has_any_records(tier_evidence_candidate):
                 tier_evidence = tier_evidence_candidate
-                final = resolve_match_outcome(
-                    match_count=match_count,
-                    caps_applied=tuple(caps_applied),
-                    near_miss_candidates=near_miss_candidates,
-                    planner_reason_code=pass1.planner_reason_code,
-                    planner_tone=pass1.planner_tone,
-                    tiered_evidence_available=True,
-                )
+                # Pattern 2 yes-consent display projection (Step 8,
+                # closing-matrix v2, 2026-06-17): the prior turn rendered
+                # the user's direct-target matches AND asked "want me to
+                # also look at related roles?" — this turn's "yes" reply
+                # was captured by the consume hook into `pattern_2_consent`.
+                # On yes, suppress direct tiers so the surface is purely
+                # the related-roles pivot the user asked for. Falls back
+                # to present_no_match if sideways is also empty.
+                if pattern_2_consent == "yes":
+                    # Step 11j fix (2026-06-17): capture the
+                    # pre-blank in_memory_matches BEFORE Step 11c
+                    # clears it, so the later Step 11h CP4 fetch
+                    # can run against the user's REAL match
+                    # candidates (the ones that surfaced on the
+                    # PRIOR turn before consent). Without this
+                    # capture, Step 11h sees the empty post-blank
+                    # in_memory_matches → CP4 diagnoses
+                    # NO_OPPORTUNITY_FOUND → returns no
+                    # recommendation → Movement C2 silently skips
+                    # → user sees no gap callout. Live-verified
+                    # symptom on 2026-06-17 (turn 5785a4a4).
+                    _pre_blank_in_memory_matches = list(in_memory_matches)
+                    tier_evidence = _blank_direct_tiers_for_pattern_2(
+                        tier_evidence
+                    )
+                    # Step 11c (2026-06-17): also clear the raw
+                    # MatchResults / training / caps / band-signal
+                    # payload that drives the frontend's structured
+                    # job-card render. The chat text comes from
+                    # tier_evidence (just blanked) but the front-end
+                    # job-card surface reads `results` / `caps_applied`
+                    # / `training_by_job` / `band_signal` directly.
+                    # Without this clearing, the chat says "no direct
+                    # match" while the cards continue showing the
+                    # prior turn's direct-target jobs — exactly the
+                    # 2026-06-17 live-verify Pattern 2 round-trip bug.
+                    # Mirrors the Bug B downgrade-to-no-match cleanup
+                    # earlier in this same function (lines ~2222-2226).
+                    results = []
+                    in_memory_matches = []
+                    match_count = 0
+                    caps_applied = []
+                    training_by_job = {}
+                    band_signal = "none"
+                    log.info(
+                        "anon_chat_v2 session=%s "
+                        "pattern_2_yes_suppressing_direct_tiers "
+                        "sideways_count=%d",
+                        staged.session_id[:8],
+                        len(tier_evidence.sideways_move),
+                    )
+                    if not _tier_evidence_has_any_records(tier_evidence):
+                        # No related roles either — fall through to
+                        # present_no_match so the user gets the honest
+                        # close (Step 9 will enhance it with SSM market
+                        # summary).
+                        final = resolve_match_outcome(
+                            match_count=0,
+                            caps_applied=(),
+                            near_miss_candidates=near_miss_candidates,
+                            planner_reason_code=pass1.planner_reason_code,
+                            planner_tone=pass1.planner_tone,
+                        )
+                    else:
+                        final = resolve_match_outcome(
+                            match_count=match_count,
+                            caps_applied=tuple(caps_applied),
+                            near_miss_candidates=near_miss_candidates,
+                            planner_reason_code=pass1.planner_reason_code,
+                            planner_tone=pass1.planner_tone,
+                            tiered_evidence_available=True,
+                        )
+                else:
+                    final = resolve_match_outcome(
+                        match_count=match_count,
+                        caps_applied=tuple(caps_applied),
+                        near_miss_candidates=near_miss_candidates,
+                        planner_reason_code=pass1.planner_reason_code,
+                        planner_tone=pass1.planner_tone,
+                        tiered_evidence_available=True,
+                    )
             elif (
                 isinstance(staged.target_noc, str)
                 and len(staged.target_noc) >= 4
@@ -2226,6 +2475,129 @@ def _try_v2_path(
     if offer_resume:
         staged.resume_upload_offered = True
 
+    # Pattern 2 set hook (closing-matrix v2, Step 7b, 2026-06-17):
+    # when the responder is about to render a tier surface with
+    # resume on file AND at least one direct-target tier has
+    # records, the prompt's PATTERN 2 rule asks the user "want me
+    # to also look at related roles?" — set the pending flag so
+    # the NEXT turn's consume hook reads the user's yes/no/other
+    # reply. Pattern 2 doesn't fire when there's no resume (that's
+    # Pattern 1's universal upload-ask path) or when only adjacency
+    # has records (that's Pattern 3's auto-fire path).
+    if (
+        final.final_move == "present_tiered_matches"
+        and staged.resume_facts_json
+        and tier_evidence is not None
+        and (
+            tier_evidence.apply_today
+            or tier_evidence.worth_a_try
+            or tier_evidence.explore_later
+        )
+    ):
+        staged.pending_adjacent_search_offer = True
+
+    # Step 11d (2026-06-17): fetch the pipeline snapshot when the
+    # responder will render a no-match-style outcome — needed by the
+    # SHAPE 2 enhanced rule (Step 9) so the LLM has the SSM market
+    # summary to weave when no direct + no adjacency surface. We
+    # fetch on present_no_match AND present_tiered_matches with a
+    # Sideways-only surface (Pattern 2 yes-consent / Pattern 3 auto-
+    # fire), so the LLM can mention the dataset's freshness even when
+    # showing related roles. Defensive try/except: a DB hiccup
+    # shouldn't break the response; falls back to None and the
+    # responder uses its existing legacy paths.
+    _pipeline_snapshot = None
+    if final.final_move in {"present_no_match", "present_tiered_matches"}:
+        try:
+            from skillbridge.chat.pipeline_snapshot import (
+                fetch_pipeline_snapshot,
+            )
+            _pipeline_snapshot = fetch_pipeline_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            log.info(
+                "anon_chat_v2 session=%s pipeline_snapshot_fetch_failed=%s",
+                staged.session_id[:8], type(exc).__name__,
+            )
+
+    # Step 11h (2026-06-17, closing-matrix v2): compute the CP4
+    # primary recommendation's canonical skill name when the
+    # responder will land on present_no_match AND the user has a
+    # resume on file. The Movement C2 sub-rule of SHAPE 2 ENHANCED
+    # RELATED_ROLES_EXHAUSTED (and the symmetric deterministic
+    # fallback) quote this verbatim to give the user a concrete
+    # gap callout instead of a generic training offer. CP4 is the
+    # same engine already running as shadow telemetry (see
+    # `_cp4_shadow_invocation` below) — this call invokes it for
+    # the responder's benefit and discards the rest of the plan.
+    # Defensive: any failure returns None and the responder reverts
+    # to its non-personalized Movement C wording.
+    _cp4_primary_gap = None
+    if (
+        final.final_move == "present_no_match"
+        and staged.resume_facts_json
+    ):
+        try:
+            from skillbridge.chat.development_plan import (
+                compute_primary_gap_name,
+            )
+            _snapshot_usable_for_cp4 = _derive_snapshot_usable()
+            _target_posting_count_for_cp4 = _derive_target_posting_count(
+                staged.target_noc
+            )
+            _skill_adjacent_for_cp4 = []
+            if tier_evidence is not None:
+                _skill_adjacent_for_cp4 = list(
+                    getattr(tier_evidence, "sideways_move", ()) or ()
+                )
+            # Step 11i fix (2026-06-17): `truth` is a TruthSummary
+            # dataclass, NOT a dict — use attribute access. Live
+            # verify on 2026-06-17 hit AttributeError because the
+            # initial Step 11h code called truth.get(...). The
+            # dataclass has the same field names; just read them
+            # directly.
+            # Step 11j fix (2026-06-17): when Pattern 2 yes-consent
+            # fired this turn (Step 11c cleared in_memory_matches),
+            # CP4 needs the PRE-BLANK matches to diagnose
+            # PREPARATION_GAP and surface a real recommendation. Use
+            # the captured `_pre_blank_in_memory_matches` when the
+            # blanking ran; otherwise fall back to the live
+            # in_memory_matches (Pattern 3 auto-fire and other
+            # present_no_match paths). Without this, the diagnosis
+            # is NO_OPPORTUNITY_FOUND on every yes-consent turn and
+            # Movement C2 silently skips.
+            _matches_for_cp4 = locals().get(
+                "_pre_blank_in_memory_matches", in_memory_matches
+            )
+            if not _matches_for_cp4:
+                _matches_for_cp4 = in_memory_matches
+            _cp4_primary_gap = compute_primary_gap_name(
+                staged=staged,
+                user_message=user_message,
+                truth_enough_to_match=bool(
+                    getattr(truth, "enough_to_match", False)
+                ),
+                truth_usable_evidence_present=bool(
+                    getattr(truth, "usable_evidence_present", False)
+                ),
+                engine_completed=True,
+                in_memory_matches=_matches_for_cp4,
+                skill_adjacent_results=_skill_adjacent_for_cp4,
+                snapshot_usable=_snapshot_usable_for_cp4,
+                target_posting_count=_target_posting_count_for_cp4,
+            )
+            if _cp4_primary_gap:
+                log.info(
+                    "anon_chat_v2 session=%s cp4_primary_gap=%r",
+                    staged.session_id[:8], _cp4_primary_gap,
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Defensive — log type + first 80 chars of message so
+            # future failure modes are diagnosable without spelunking.
+            log.info(
+                "anon_chat_v2 session=%s cp4_primary_gap_failed=%s msg=%s",
+                staged.session_id[:8], type(exc).__name__, str(exc)[:80],
+            )
+
     reply = compose_response_v2(ResponderV2Input(
         user_message=user_message,
         decision=final,
@@ -2240,6 +2612,8 @@ def _try_v2_path(
         near_miss_payload=near_miss_payload,
         tier_evidence=tier_evidence,
         should_offer_resume_upload=offer_resume,
+        pipeline_snapshot=_pipeline_snapshot,
+        cp4_primary_gap=_cp4_primary_gap,
     ))
 
     # AR-6b: append the adjacency soft offer when the standard match
@@ -3733,6 +4107,22 @@ def handle_anonymous(
     if pending_adjacent_offer:
         staged.pending_adjacent_offer = False
 
+    # Pattern 2 consume hook (closing-matrix v2, Step 7b, 2026-06-17):
+    # the prior turn rendered a Pattern 2 closing ("want me to also
+    # look at related roles?") and set `pending_adjacent_search_offer`.
+    # This turn's user message is the reply. Classify it as
+    # yes / no / other; log the consent decision; clear the flag.
+    # Routing-to-CP5 on a "yes" consent is Step 8 (= Sideways
+    # infrastructure reuse) — Step 7b only decides consent.
+    pattern_2_consent: str | None = None
+    if staged.pending_adjacent_search_offer:
+        pattern_2_consent = _classify_pattern_2_reply(message)
+        staged.pending_adjacent_search_offer = False
+        log.info(
+            "anon_chat session=%s pattern_2_consent=%s",
+            staged.session_id[:8], pattern_2_consent,
+        )
+
     # 0) If the user uploaded a resume, run the resume pipeline before
     # the regular chat extractor. The extracted facts feed staged.* slots,
     # so the rest of the handler "just sees" a richer profile.
@@ -4068,6 +4458,23 @@ def handle_anonymous(
     for slot in extraction.declined:
         staged.mark_declined(slot)
 
+    # 2.5) skills_text recovery (2026-06-17): when the LLM extractor
+    # signalled "user was listing skills" (raw_keys_dropped contains
+    # 'ungrounded:skills_text') but its slot-level evidence wasn't a
+    # verbatim substring, the slot stays empty even though per-skill
+    # grounding produced >=3 real skills. Change C's skills_text_present
+    # guard then reads False and the engine refuses to run — user is
+    # re-asked despite having just listed real skills. See helper
+    # docstring for the gating rules and phantom-skill protection.
+    if _maybe_recover_skills_text_slot(
+        staged=staged, extraction=extraction, message=message,
+    ):
+        log.info(
+            "anon_chat session=%s skills_text_recovered=%d_skills_grounded "
+            "(slot-level grounding failed but per-skill grounding passed)",
+            staged.session_id[:8], len(extraction.skills),
+        )
+
     # 2a) Safety net: if we asked a single closed-vocabulary slot last
     # turn and the user answered with a short natural reply ("day",
     # "full time"), fill that slot deterministically.
@@ -4172,6 +4579,7 @@ def handle_anonymous(
             resume_info=resume_info,
             store=store,
             pending_adjacent_offer=pending_adjacent_offer,
+            pattern_2_consent=pattern_2_consent,
         )
         if v2_response is not None:
             return v2_response

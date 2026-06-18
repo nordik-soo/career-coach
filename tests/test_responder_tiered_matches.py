@@ -193,7 +193,7 @@ def test_compose_response_v2_routes_to_tiered_branch():
     with patch("skillbridge.chat.responder.is_enabled", return_value=False):
         reply = compose_response_v2(inp)
     # Fallback rendered the three-tier prose with the Apply today header.
-    assert "**Apply today — your skills line up**" in reply
+    assert "**Strong match — apply today**" in reply
 
 
 def test_tiered_branch_does_not_consult_legacy_results_field():
@@ -204,7 +204,9 @@ def test_tiered_branch_does_not_consult_legacy_results_field():
     inp.training_by_job = {}   # explicit
     with patch("skillbridge.chat.responder.is_enabled", return_value=False):
         reply = compose_response_v2(inp)
-    assert "Apply today" in reply
+    # scoring-v6 (2026-06-17): heading is "Strong match — apply today";
+    # substring check uses the new prefix.
+    assert "Strong match" in reply
 
 
 # =========================================================================
@@ -235,7 +237,7 @@ def test_falls_back_when_llm_disabled():
         "skillbridge.chat.responder.is_enabled", return_value=False,
     ):
         reply = _compose_tiered_matches_response(inp)
-    assert "**Apply today — your skills line up**" in reply
+    assert "**Strong match — apply today**" in reply
     assert "Diamond J" in reply or "Accounts Payable Clerk" in reply
 
 
@@ -247,7 +249,8 @@ def test_falls_back_when_llm_returns_empty_string():
         "skillbridge.chat.responder.call", return_value="",
     ):
         reply = _compose_tiered_matches_response(inp)
-    assert "Apply today" in reply
+    # scoring-v6 (2026-06-17): heading is "Strong match — apply today".
+    assert "Strong match" in reply
 
 
 def test_falls_back_when_policy_rejects():
@@ -263,7 +266,8 @@ def test_falls_back_when_policy_rejects():
     ):
         reply = _compose_tiered_matches_response(inp)
     assert reply != bad_reply
-    assert "Apply today" in reply
+    # scoring-v6 (2026-06-17): heading is "Strong match — apply today".
+    assert "Strong match" in reply
     assert "$" not in reply
 
 
@@ -276,7 +280,7 @@ def test_returns_llm_reply_when_policy_passes():
     inp = _input(tier_evidence=_evidence(strong=[_strong()]))
     good_reply = (
         "Here's what's on the board.\n\n"
-        "**Apply today — your skills line up**\n\n"
+        "**Strong match — apply today**\n\n"
         "You'd be competitive for this one. Diamond J is hiring an "
         "Accounts Payable Clerk. They ask for QuickBooks, which you "
         "have. https://example.com/strong\n\n"
@@ -407,7 +411,7 @@ def _well_formed_strong_reply(url: str = "https://example.com/strong") -> str:
     isolate a single shared safety rule."""
     return (
         "Here's what's on the board.\n\n"
-        "**Apply today — your skills line up**\n\n"
+        "**Strong match — apply today**\n\n"
         "You'd be competitive for this one. Diamond J is hiring an "
         f"Accounts Payable Clerk. They ask for QuickBooks, which you "
         f"have. {url}\n\n"
@@ -489,9 +493,12 @@ def test_empty_view_falls_back_to_pure_empty_state_body():
     inp = _input(tier_evidence=None)
     reply = _compose_tiered_matches_response(inp)
     assert "Nothing on the board matches yet." in reply
-    # No tier headers anywhere
-    assert "Apply today" not in reply
-    assert "Worth a try" not in reply
+    # No tier headers anywhere. scoring-v6 (2026-06-17): heading
+    # substrings renamed to the 4-label vocabulary.
+    assert "Strong match" not in reply
+    assert "Good match" not in reply
+    assert "Stretch" not in reply
+    assert "Explore later" not in reply
     assert "Sideways move" not in reply
 
 
@@ -503,7 +510,7 @@ def test_policy_accepts_reply_with_full_tier_shape():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     reply = (
         "Here's what's on the board.\n\n"
-        "**Apply today — your skills line up**\n\n"
+        "**Strong match — apply today**\n\n"
         "You'd be competitive for this one. Diamond J is hiring an "
         "Accounts Payable Clerk. They ask for QuickBooks, which you "
         "have. https://example.com/strong\n\n"
@@ -522,7 +529,7 @@ def test_policy_rejects_internal_token_leakage():
         "strength_claim_text", "job_facts", "is_normalized_equal",
     ):
         reply = (
-            "**Apply today — your skills line up**\n"
+            "**Strong match — apply today**\n"
             "You'd be competitive for this one. Diamond J is hiring an "
             f"Accounts Payable Clerk. The {leaked} matched. "
             "https://example.com/strong\n\n"
@@ -629,7 +636,7 @@ def test_policy_accepts_single_canonical_phrase_with_natural_transition():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     natural_reply = (
         "Here's what's on the board.\n\n"
-        "**Apply today — your skills line up**\n\n"
+        "**Strong match — apply today**\n\n"
         "You'd be competitive for this one. Diamond J is hiring an "
         "Accounts Payable Clerk. Your QuickBooks aligns with their "
         "QuickBooks requirement. https://example.com/strong\n\n"
@@ -651,7 +658,7 @@ def test_policy_accepts_reply_describing_both_strong_jobs():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     full_reply = (
         "Here's what's on the board.\n\n"
-        "**Apply today — your skills line up**\n\n"
+        "**Strong match — apply today**\n\n"
         "You'd be competitive for this one. Diamond J is hiring an "
         "Accounts Payable Clerk. Your QuickBooks aligns with their "
         "QuickBooks requirement. https://example.com/strong\n\n"
@@ -668,7 +675,7 @@ def test_policy_accepts_stretch_reply_with_full_training_details():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     full_reply = (
         "Here's what's on the board.\n\n"
-        "**Worth a try — close, with gaps to address**\n\n"
+        "**Stretch — reachable with prep**\n\n"
         "This one is close — there's a specific gap to close first. "
         "Algoma Office is hiring a Junior Accountant. Your QuickBooks "
         "aligns with their QuickBooks requirement. "
@@ -703,7 +710,7 @@ def test_policy_accepts_stretch_reply_with_no_verified_sentence():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     reply_with_no_verified = (
         "Here's what's on the board.\n\n"
-        "**Worth a try — close, with gaps to address**\n\n"
+        "**Stretch — reachable with prep**\n\n"
         "This one is close — there's a specific gap to close first. "
         "Algoma Office is hiring a Junior Accountant. Your QuickBooks "
         "aligns with their QuickBooks requirement. "
@@ -746,7 +753,7 @@ def test_policy_accepts_reply_with_credential_warning_text():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     reply_with_warning = (
         "Here's what's on the board.\n\n"
-        "**Apply today — your skills line up**\n\n"
+        "**Strong match — apply today**\n\n"
         "You'd be competitive for this one. Diamond J is hiring an "
         "Accounts Payable Clerk. Your QuickBooks aligns with their "
         "QuickBooks requirement. "
@@ -769,7 +776,7 @@ def test_policy_accepts_each_record_with_its_own_paragraph_alignment():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     well_scoped_reply = (
         "Here's what's on the board.\n\n"
-        "**Apply today — your skills line up**\n\n"
+        "**Strong match — apply today**\n\n"
         "You'd be competitive for this one. Diamond J is hiring an "
         "Accounts Payable Clerk. Your QuickBooks aligns with their "
         "QuickBooks requirement. https://example.com/strong\n\n"
@@ -808,7 +815,7 @@ def test_policy_accepts_same_title_employer_distinct_url_paragraphs():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     well_scoped_reply = (
         "Here's what's on the board.\n\n"
-        "**Apply today — your skills line up**\n\n"
+        "**Strong match — apply today**\n\n"
         "You'd be competitive for this one. Diamond J is hiring an "
         "Accounts Payable Clerk. Your QuickBooks aligns with their "
         "QuickBooks requirement. https://example.com/strong\n\n"
@@ -832,7 +839,7 @@ def test_policy_rejects_internal_tokens_case_insensitively():
     ):
         reply = (
             "Here's what's on the board.\n\n"
-            "**Apply today — your skills line up**\n\n"
+            "**Strong match — apply today**\n\n"
             "You'd be competitive for this one. Diamond J is hiring an "
             f"Accounts Payable Clerk. The {leaked} matched. "
             "https://example.com/strong\n\n"
@@ -866,7 +873,7 @@ def _stretch_reply(body_fragment: str) -> str:
     only judges the gap-content section."""
     return (
         "Here's what's on the board.\n\n"
-        "**Worth a try — close, with gaps to address**\n\n"
+        "**Stretch — reachable with prep**\n\n"
         "This one is close — there's a specific gap to close first. "
         "Algoma Office is hiring a Junior Accountant. Your QuickBooks "
         "aligns with their QuickBooks requirement. "
@@ -969,7 +976,7 @@ def test_policy_accepts_stretch_only_reply_ending_with_all_tier_closing():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     reply = (
         "Here's what's on the board.\n\n"
-        "**Worth a try — close, with gaps to address**\n\n"
+        "**Stretch — reachable with prep**\n\n"
         "This one is close — there's a specific gap to close first. "
         "Algoma Office is hiring a Junior Accountant. Your QuickBooks "
         "aligns with their QuickBooks requirement. "
@@ -988,7 +995,7 @@ def test_policy_rejects_reply_without_any_authorized_closing():
     view = build_sanitized_responder_view_for_tiered_matches(inp.tier_evidence)
     reply = (
         "Here's what's on the board.\n\n"
-        "**Worth a try — close, with gaps to address**\n\n"
+        "**Stretch — reachable with prep**\n\n"
         "This one is close — there's a specific gap to close first. "
         "Algoma Office is hiring a Junior Accountant. Your QuickBooks "
         "aligns with their QuickBooks requirement. "

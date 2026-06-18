@@ -1049,6 +1049,16 @@ class ResponderV2Input:
     # staged.resume_upload_offered=True at the same time so the offer
     # doesn't re-fire on every subsequent thin-evidence turn.
     should_offer_resume_upload: bool = False
+    # Step 11h (2026-06-17, closing-matrix v2): the CP4 primary
+    # recommendation's canonical skill name when available, or None.
+    # Populated by the handler before the responder is called, on
+    # turns where the closing matrix can use it (currently:
+    # `present_no_match` with resume_facts in play — the SHAPE 2 /
+    # RELATED_ROLES_EXHAUSTED case, Movement C2 in
+    # OUTCOME_RESPONDER_PROMPT). The LLM and the deterministic
+    # fallback both quote this verbatim — no paraphrase, no
+    # invention.
+    cp4_primary_gap: str | None = None
 
 
 def compose_response_v2(inp: ResponderV2Input) -> str:
@@ -1538,6 +1548,57 @@ def _build_user_block_v2(
 
     if inp.resume_facts and _resume_facts_summary_has_content(inp.resume_facts):
         parts.append("RESUME_FACTS:\n" + _resume_facts_summary_for_prompt(inp.resume_facts))
+
+    # Step 11d (2026-06-17): pipe the SSM market snapshot through to the
+    # LLM happy path on no-match turns. SHAPE 2 enhanced (Step 9) needs
+    # `total_active_jobs`, `top_sectors`, and `top_employers` to weave
+    # the "Sault Ste. Marie has 43 active postings — mostly in healthcare,
+    # trades, and admin" panorama. Without this, the LLM defaults to the
+    # legacy "I don't see one + SCCC referral" close — which the live
+    # verify on 2026-06-17 surfaced as a dead-end for resume-uploaded
+    # users at the bottom of the closing matrix.
+    if inp.pipeline_snapshot is not None:
+        parts.append("PIPELINE_SNAPSHOT:\n" + json.dumps({
+            "total_active_jobs": inp.pipeline_snapshot.total_active_jobs,
+            "last_publish_at_text": inp.pipeline_snapshot.last_publish_at_text,
+            "top_sectors": list(inp.pipeline_snapshot.top_sectors),
+            "top_employers": list(inp.pipeline_snapshot.top_employers),
+        }))
+
+    # Step 11e (2026-06-17, closing-matrix v2): signal to the LLM that
+    # we already attempted the related-role (CP5) search on this turn's
+    # engine run — either via Pattern 2 yes-consent or Pattern 3
+    # auto-fire — and the search returned 0 results. Without this
+    # signal, SHAPE 2's legacy "Optional: offer one alternative angle"
+    # rule fires (the LLM thinks it might surface related roles) and
+    # the closing reads "want me to look at related roles?" — but the
+    # engine ALREADY tried, the search returned empty, and the system
+    # is asking the user to re-request a path the system has already
+    # exhausted. Infinite-offer loop. Discovered in live verify on
+    # 2026-06-17.
+    #
+    # Trigger: present_no_match outcome AND resume facts on file. The
+    # second condition is the discriminator — when no resume is on
+    # file the path is Pattern 1 (upload ask, SHAPE 1), which is a
+    # different closing branch entirely. With resume on file at
+    # present_no_match, by construction the engine has run a full
+    # adjacency lookup as part of `_build_tier_evidence_for_handler`
+    # and concluded "no related-role bridge available for this profile."
+    if (
+        d.final_move == "present_no_match"
+        and inp.resume_facts
+        and _resume_facts_summary_has_content(inp.resume_facts)
+    ):
+        parts.append("RELATED_ROLES_EXHAUSTED: yes")
+
+    # Step 11h (2026-06-17): when CP4 produced a primary recommendation
+    # (canonical skill name), surface it for MOVEMENT C2 ("the one thing
+    # that came up is [GAP]"). Quoted VERBATIM by both the LLM happy path
+    # (per OUTCOME_RESPONDER_PROMPT grounding rules) and the
+    # deterministic fallback. None when CP4 returned no recommendation
+    # (Movement C2 then skips).
+    if inp.cp4_primary_gap:
+        parts.append(f"CP4_PRIMARY_GAP: {inp.cp4_primary_gap}")
 
     return "\n".join(parts)
 
@@ -2659,6 +2720,83 @@ def _present_no_match_fallback_v2(inp: ResponderV2Input) -> str:
         )
         return msg
 
+    # Step 9 → Step 11g (SHAPE 2 enhanced + RELATED_ROLES_EXHAUSTED,
+    # 2026-06-17): when the no-match branch fires without a resume-
+    # upload offer — meaning resume IS already uploaded AND adjacency
+    # returned nothing AND we're at the absolute bottom of the closing
+    # matrix — render the 3-movement structure that matches Step 11f's
+    # prompt rule for the LLM happy path. Symmetric fallback: when the
+    # LLM is disabled / fails policy and we drop here, the user sees
+    # the same coherent shape they would have gotten from the LLM.
+    #
+    # 3-movement structure (LOCKED 2026-06-17 by Nazmul):
+    #   A: acknowledgment — "I checked for related roles but didn't
+    #      find any other postings your background fits right now."
+    #   B: market panorama — total_active_jobs + top sectors + top
+    #      employers, from PIPELINE_SNAPSHOT.
+    #   C: training-offer close — defer specific training to the
+    #      next turn (Step 10 will fire CP4 when user consents).
+    snap = inp.pipeline_snapshot
+    if snap is not None and snap.total_active_jobs > 0 and (
+        snap.top_sectors or snap.top_employers
+    ):
+        # MOVEMENT A — acknowledge the related-roles search ran.
+        # Replaces the generic "I don't see a fit" that read as
+        # "the system never tried" — Pattern 2 yes-consent / Pattern
+        # 3 auto-fire ALREADY tried the adjacency lookup.
+        msg = (
+            "I checked for related roles but didn't find any other "
+            "postings your background fits right now. "
+        )
+
+        # MOVEMENT B — market context: count + top sectors when available.
+        sector_phrase = _format_top_sectors_phrase(snap.top_sectors)
+        if sector_phrase:
+            msg += (
+                f"Right now there are {snap.total_active_jobs} active "
+                f"postings in Sault Ste. Marie — {sector_phrase}. "
+            )
+        else:
+            msg += (
+                f"Right now there are {snap.total_active_jobs} active "
+                f"postings in Sault Ste. Marie. "
+            )
+        # Concrete employer names the user can recognize.
+        employer_phrase = _format_top_employers_phrase(snap.top_employers)
+        if employer_phrase:
+            msg += f"{employer_phrase} "
+
+        # MOVEMENT C — 3 sub-movements: skill ack + gap callout +
+        # training-direction close. Step 11h: the LLM happy path
+        # is the canonical path (gets to pick which skills to name
+        # from RESUME_FACTS, weave them naturally); the fallback
+        # uses a SIMPLER form because hand-templating skill name
+        # selection out of resume_facts in plain Python would read
+        # robotically. The fallback's degradation is acceptable —
+        # it's the safety net for when the LLM fails policy.
+        #
+        # C1 (skill ack): omitted in the fallback (safe omission
+        #   beats robotic enumeration of every staged skill).
+        # C2 (gap callout): when inp.cp4_primary_gap is set, name
+        #   it verbatim as "the one thing that came up."
+        # C3 (training-direction close): the locked phrasing from
+        #   the user spec.
+        if inp.cp4_primary_gap:
+            msg += (
+                f"The one thing that came up is "
+                f"{inp.cp4_primary_gap}. "
+            )
+        msg += (
+            "If you want to improve your skills gap, I can help to "
+            "give some training directions. Do you want?"
+        )
+        return msg
+
+    # Fallback (no snapshot, empty dataset, or snapshot missing sector
+    # / employer data): preserve the v1 SHAPE 2 honest close. The
+    # user-always-gets-something principle still applies (SCCC
+    # referral is a meaningful next step), just without the market
+    # panorama enhancement.
     msg = (
         "I don't see one in today's Sault Ste. Marie postings. "
     )
@@ -2673,6 +2811,37 @@ def _present_no_match_fallback_v2(inp: ResponderV2Input) -> str:
         "they come in."
     )
     return msg
+
+
+def _format_top_sectors_phrase(top_sectors: tuple[str, ...]) -> str:
+    """Format up to 3 sector names as a coach-voice "mostly in X, Y,
+    and Z" phrase. Returns empty string when no sectors are available
+    (caller substitutes a sectors-free variant)."""
+    if not top_sectors:
+        return ""
+    sectors = list(top_sectors[:3])
+    if len(sectors) == 1:
+        return f"mostly in {sectors[0]}"
+    if len(sectors) == 2:
+        return f"mostly in {sectors[0]} and {sectors[1]}"
+    return f"mostly in {sectors[0]}, {sectors[1]}, and {sectors[2]}"
+
+
+def _format_top_employers_phrase(top_employers: tuple[str, ...]) -> str:
+    """Format up to 3 employer names as a coach-voice "X, Y, and Z
+    are actively hiring" phrase. Returns empty string when no
+    employers are available."""
+    if not top_employers:
+        return ""
+    employers = list(top_employers[:3])
+    if len(employers) == 1:
+        return f"{employers[0]} is actively hiring."
+    if len(employers) == 2:
+        return f"{employers[0]} and {employers[1]} are actively hiring."
+    return (
+        f"{employers[0]}, {employers[1]}, and {employers[2]} are "
+        f"actively hiring."
+    )
 
 
 def _present_matches_fallback_v2(
@@ -2917,12 +3086,46 @@ def _build_user_block_for_tiered_matches(
     if inp.target_role_text:
         parts.append(f"TARGET_ROLE: {inp.target_role_text}")
 
+    # Gap 1 (2026-06-16 evening, user-signed-off): when the engine
+    # surfaces only stretch-tier matches AND the user has no resume,
+    # the upload offer should weave into the response just like it
+    # does on present_no_match turns. The handler-level
+    # `_should_offer_resume_upload` gate is already band-aware
+    # (fires on `band_signal in {low_only, stretch_only}` even when
+    # results > 0). Threading the flag here lets the LLM mention
+    # "uploading a resume might unlock a stronger match" alongside
+    # the stretch-tier card.
+    if inp.should_offer_resume_upload:
+        parts.append("RESUME_UPLOAD_OFFER: yes")
+
+    # scoring-v6 (2026-06-17): the apply_today slot still carries
+    # both Strong (competitive_match) and Good (strongest_current)
+    # band records, but the response renders them under DISTINCT
+    # headings per the closing-matrix v2 design. Split them at the
+    # serialization boundary so the LLM sees two clean sections
+    # rather than one mixed bag — keeps the prompt's heading rules
+    # straightforward (records in STRONG_MATCHES → Strong heading;
+    # records in GOOD_MATCHES → Good heading).
     parts.append("STRONG_MATCHES:")
     for item in view.prompt_tiered_apply_today:
-        parts.append(json.dumps(_serialize_strong_for_tiered(item)))
+        if item.strength_claim_text == "competitive_match":
+            parts.append(json.dumps(_serialize_strong_for_tiered(item)))
+
+    parts.append("GOOD_MATCHES:")
+    for item in view.prompt_tiered_apply_today:
+        if item.strength_claim_text == "strongest_current":
+            parts.append(json.dumps(_serialize_strong_for_tiered(item)))
 
     parts.append("STRETCH_MATCHES:")
     for item in view.prompt_tiered_worth_a_try:
+        parts.append(json.dumps(_serialize_stretch_for_tiered(item)))
+
+    # scoring-v6 (2026-06-17): the new fourth direct-target section.
+    # Records the classifier labeled "explore_later" — surfaced under
+    # the "Explore later — not your main target" heading rather than
+    # hidden by the responder's old eligible-only-low branch.
+    parts.append("EXPLORE_LATER:")
+    for item in view.prompt_tiered_explore_later:
         parts.append(json.dumps(_serialize_stretch_for_tiered(item)))
 
     parts.append("ADJACENT_JOBS:")
@@ -3213,9 +3416,15 @@ def _compose_tiered_matches_response(inp: ResponderV2Input) -> str:
         return text
 
     if not _policy_ok_tiered_matches(reply, inp, view):
+        # Debug aid (2026-06-16 evening): log the actual rejected reply
+        # tail so we can diagnose WHY the policy gate rejected it. The
+        # specific warning above tells us WHICH rule fired; this tail
+        # tells us what Haiku actually wrote so we can fix the prompt
+        # if its closing instructions aren't landing.
         log.warning(
             "Responder tiered_matches reply failed policy check; "
-            "falling back",
+            "falling back. last_120_chars_of_reply=%r",
+            reply[-120:] if reply else "",
         )
         text, _ = render_coach_tiers_fallback(view, inp.pipeline_snapshot)
         return text

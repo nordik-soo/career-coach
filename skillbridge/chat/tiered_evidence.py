@@ -184,16 +184,33 @@ class StretchMatch:
 
 @dataclass(frozen=True)
 class TieredEvidence:
-    """The three-tier evidence package.
+    """The tier evidence package (post scoring-v6, 2026-06-17).
+
+    Now FOUR direct-target tiers + the adjacency tier:
+      - apply_today    : Strong + Good labels (top tier under v6 naming
+                          is split into "Strong match" + "Good match"
+                          but both share the apply_today slot for now;
+                          response heading rename happens in Step 4).
+      - worth_a_try    : Stretch label
+      - explore_later  : Explore-later label (NEW in v6; previously
+                          hidden by responder's eligible-only-low
+                          branch — now surfaced as a fourth tier so
+                          users see a panorama of what's available).
+      - sideways_move  : NOC-adjacent matches (unchanged; later
+                          slices may wire this as CP5).
 
     Tier exclusivity is invariant: a job_id appears in at most one
-    of (apply_today, worth_a_try, sideways_move). Enforced centrally
-    in `build_tiered_evidence`. Empty tiers are empty tuples — never
-    filled with placeholder entries.
+    of these slots. Enforced centrally in `build_tiered_evidence`.
+    Empty tiers are empty tuples — never filled with placeholders.
+
+    `explore_later` defaults to () so existing TieredEvidence
+    constructors (tests, fixtures, etc.) keep compiling without
+    modification.
     """
     apply_today: tuple[StrongMatch, ...]
     worth_a_try: tuple[StretchMatch, ...]
     sideways_move: tuple[AdjacentJob, ...]
+    explore_later: tuple[StretchMatch, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -478,7 +495,16 @@ def enrich_accepted_adjacency_jobs(
 # =========================================================================
 _STRONG_CAP_DEFAULT = 3
 _STRETCH_CAP_DEFAULT = 2
+_EXPLORE_LATER_CAP_DEFAULT = 2  # 2026-06-17 scoring-v6
 _ADJACENT_CAP_DEFAULT = 3
+
+# scoring-v6 (2026-06-17): 30% floor below which postings are filtered
+# out of all tier surfaces. Matches scoring below this threshold are
+# more noise than signal for the user — surfacing them violates the
+# "user always gets something meaningful" principle. Anything between
+# 30% and the engine's "stretch" band (40%) lands in the new
+# Explore-later tier instead of being hidden, so the principle holds.
+_MATCH_VISIBILITY_FLOOR = 0.30
 
 _VALID_TRAINING_FORMATS: frozenset[str] = frozenset({"online", "in-person", "hybrid"})
 
@@ -535,26 +561,115 @@ def _required_missing_or_none(result: MatchResult) -> list[str] | None:
     return rm
 
 
-def _is_apply_today(result: MatchResult) -> bool:
-    """v5 lock:
-        band in {"strong", "good"} AND required_missing == []
+MatchLabel = Literal["strong", "good", "stretch", "explore_later"]
 
-    Fix 1 (fail closed): a job whose MatchResult lacks an explicit
-    `required_missing` list cannot enter Apply Today. We don't admit
-    on missing-data assumption.
 
-    required_missing == [] implies no missing required credential
-    (credentials are a subset of required skills) — so the three
-    locked conditions collapse into these checks.
+def _classify_match_label(
+    result: MatchResult,
+    training_for_job: list[dict] | None,
+) -> MatchLabel | None:
+    """3-signal classifier (2026-06-17, scoring-v6 LOCKED).
+
+    Replaces the v5 two-layer model (band-only `match_band` + a
+    separate gap-presence filter in `_is_apply_today` / `_is_worth_a_try`).
+    Reads three signals — score band, blocker count, learnable-gap
+    count — and returns one of four labels (or None when the match
+    should not be surfaced at all).
+
+    Inputs:
+      - score band:       result.match_band (from MATCH.band_* thresholds:
+                          strong>=0.75, good>=0.60, stretch>=0.40, else low)
+      - blocker count:    count of credential gaps in required_missing
+                          (is_credential_skill_name == True)
+      - learnable count:  count of non-credential gaps in required_missing
+
+    Decision flow (top-down — first matching rule wins):
+      0.  Filtered (returns None):
+          - match_eligible is False
+          - match_score < 0.30 (the visibility floor)
+          - score_explanation.required_missing is absent (fail closed,
+            same as v5 _is_apply_today / _is_worth_a_try)
+          - credential-only gap profile AND no actionable training for
+            any cred gap (preserves v5 "actionable nothing" guard:
+            a job with no apply path AND no training path offers the
+            user nothing; surfacing it violates the principle)
+
+      1.  band == "low" (0.30 <= score < 0.40)        → explore_later
+      2.  learnable_count >= 5                         → explore_later
+      3.  blocker_count >= 2                           → explore_later
+      4.  band == "stretch"                            → stretch
+      5.  band in {strong,good} AND learnable in 3..4  → stretch
+      6.  band in {strong,good} AND blocker_count == 1 → stretch
+      7.  band == "strong" (no blocker, <=2 learnable) → strong
+      8.  band == "good"   (no blocker, <=2 learnable) → good
+
+    Trade-off note (recommendation (i), 2026-06-17): all credential
+    gaps count as blockers regardless of training availability. The
+    spec calls one of these an "achievable blocker" (demoting Strong
+    → Stretch) and two-or-more "stacked blockers" (demoting to
+    Explore-later). A future slice can introduce an "achievable"
+    distinction (e.g., training_options present → achievable). For
+    now the simpler rule lets us ship the classifier without adding
+    a new heuristic.
     """
     if not result.match_eligible:
-        return False
-    if result.match_band not in ("strong", "good"):
-        return False
+        return None
+    if result.match_score < _MATCH_VISIBILITY_FLOOR:
+        return None
+
     required_missing = _required_missing_or_none(result)
     if required_missing is None:
-        return False
-    return required_missing == []
+        return None  # fail closed (matches v5 predicate behavior)
+
+    cred_gaps, non_cred_gaps = _split_required_missing(required_missing)
+
+    # "Actionable nothing" filter (v5 carry-forward): a credential-only
+    # gap profile with no actionable training maps to no path forward.
+    # Surfacing such a posting violates the user-always-gets-something
+    # principle (no apply path AND no training path).
+    if cred_gaps and not non_cred_gaps:
+        if not _all_credentials_have_training(cred_gaps, training_for_job):
+            return None
+
+    blocker_count = len(cred_gaps)
+    learnable_count = len(non_cred_gaps)
+
+    if result.match_band == "low":
+        return "explore_later"
+    if learnable_count >= 5:
+        return "explore_later"
+    if blocker_count >= 2:
+        return "explore_later"
+    if result.match_band == "stretch":
+        return "stretch"
+    if learnable_count >= 3:
+        return "stretch"
+    if blocker_count == 1:
+        return "stretch"
+    if result.match_band == "strong":
+        return "strong"
+    if result.match_band == "good":
+        return "good"
+
+    return None  # defensive — should be unreachable given band coverage
+
+
+def _is_apply_today(
+    result: MatchResult,
+    training_for_job: list[dict] | None = None,
+) -> bool:
+    """Apply-today admission (post scoring-v6, 2026-06-17).
+
+    Delegates to `_classify_match_label`. Apply-today now means the
+    classifier returned "strong" or "good" — i.e., high or mid score
+    band AND no blockers AND <=2 learnable gaps. Replaces the v5
+    rule (`band in {strong,good} AND required_missing == []`) — the
+    old rule demoted ANY match with a gap, even a single learnable
+    one. Per Nazmul (2026-06-17): a real coach treats a 9/10 match
+    with one learnable gap as "go apply, here's a heads-up about X",
+    not "Worth a try."
+    """
+    return _classify_match_label(result, training_for_job) in ("strong", "good")
 
 
 def _all_credentials_have_training(
@@ -597,34 +712,51 @@ def _is_worth_a_try(
     result: MatchResult,
     training_for_job: list[dict] | None,
 ) -> bool:
-    """v5 lock + step-8 spec + Fix 2 + CP3 step 2 (2026-06-15):
-        band in {"strong", "good", "stretch"} AND at least one required
-        gap; EVERY missing required credential must have at least one
-        mapped training option — including mixed credential/non-
-        credential cases. A single credential gap with no training
-        makes the job non-actionable.
+    """Worth-a-try admission (post scoring-v6, 2026-06-17).
 
-    The original v5 design excluded band="strong" because Apply today
-    was the canonical home for strong-band records. But a strong-band
-    record with a non-empty `required_missing` falls between the two
-    rules — Apply today requires `required_missing == []`, Worth a try
-    used to require `band != "strong"`. That left the record dropped
-    from the tier surface and forced the legacy card render.
-    Admitting strong-band records with a real gap here keeps the tier
-    surface inclusive: the strong overall score doesn't change the
-    fact that there's a specific gap to close first.
+    Delegates to `_classify_match_label`. Worth-a-try now means the
+    classifier returned "stretch" — i.e., stretch-band match, OR
+    high/mid band with 3-4 learnable gaps, OR high/mid band with one
+    credential blocker.
 
-    Fix 1 (fail closed): missing required_missing list → reject.
+    Behavioral diff vs v5:
+      - A strong-band match with required_missing==[] previously was
+        Apply-today; now (still) Apply-today (label "strong"). No
+        change.
+      - A strong-band match with 1 learnable gap previously was
+        Worth-a-try; now it's Apply-today ("strong" label). The
+        classifier admits up to 2 learnable gaps in the top tier.
+      - A strong-band match with 5+ learnable gaps previously was
+        Worth-a-try; now it's Explore-later. Honest demotion: many
+        gaps is many gaps, even with a high overall score.
+      - A stretch-band match with required gaps previously was
+        Worth-a-try; still is. No change.
+      - A credential-only gap profile without training is still
+        filtered out — the "actionable nothing" guard moved into
+        the classifier (returns None).
     """
-    if not result.match_eligible:
-        return False
-    if result.match_band not in ("strong", "good", "stretch"):
-        return False
-    required_missing = _required_missing_or_none(result)
-    if required_missing is None or not required_missing:
-        return False
-    cred_gaps, _non_cred_gaps = _split_required_missing(required_missing)
-    return _all_credentials_have_training(cred_gaps, training_for_job)
+    return _classify_match_label(result, training_for_job) == "stretch"
+
+
+def _is_explore_later(
+    result: MatchResult,
+    training_for_job: list[dict] | None = None,
+) -> bool:
+    """Explore-later admission (post scoring-v6, 2026-06-17 NEW tier).
+
+    A match is Explore-later when the classifier returned
+    "explore_later" — i.e., low-band match (score 0.30-0.39, above
+    the visibility floor but below stretch), OR any band with 5+
+    learnable gaps, OR any band with 2+ credential blockers.
+
+    Previously the engine's "low" band (<0.40) was hidden entirely
+    by the responder's `Eligible-only-low` branch — users never saw
+    these matches. Under the user-always-gets-something principle,
+    showing them as a clearly-labeled "Explore later" tier is more
+    honest: the user gets a panorama of what the engine considered,
+    framed appropriately, instead of an opaque "no match."
+    """
+    return _classify_match_label(result, training_for_job) == "explore_later"
 
 
 def _strength_claim_for_strong(result: MatchResult) -> StrengthClaim:
@@ -815,6 +947,7 @@ def build_tiered_evidence(
     user_embeddings_matrix=None,
     strong_cap: int = _STRONG_CAP_DEFAULT,
     stretch_cap: int = _STRETCH_CAP_DEFAULT,
+    explore_later_cap: int = _EXPLORE_LATER_CAP_DEFAULT,
     adjacent_cap: int = _ADJACENT_CAP_DEFAULT,
 ) -> TieredEvidence:
     """Deterministically partition `results` + `accepted_adjacent` into
@@ -870,7 +1003,12 @@ def build_tiered_evidence(
             continue
         if not _in_target_noc_family(r.noc_code, target_noc):
             continue
-        if not _is_apply_today(r):
+        # scoring-v6 (2026-06-17): pass training_for_job so the
+        # classifier's actionable-nothing guard has full inputs (a
+        # credential-only gap profile w/o training can't be Apply-today
+        # under any rule, but the classifier reads training to decide
+        # whether to filter the match entirely or demote to a lower tier).
+        if not _is_apply_today(r, training_map.get(r.job_id)):
             continue
         apply_today.append(_project_to_strong(r))
         apply_today_ids.add(r.job_id)
@@ -894,8 +1032,33 @@ def build_tiered_evidence(
         worth_a_try.append(_project_to_stretch(r, training_for_job))
         worth_a_try_ids.add(r.job_id)
 
+    # --- Explore later (NEW, scoring-v6 2026-06-17) ---
+    # Picks up matches the classifier labeled "explore_later" — i.e.,
+    # low-band (score 0.30-0.39, above visibility floor), or any band
+    # with 5+ learnable gaps, or any band with 2+ credential blockers.
+    # Excludes job_ids already in Apply-today or Worth-a-try.
+    # Reuses _project_to_stretch — Explore-later items share the
+    # StretchMatch shape because they carry the same prioritized_gaps
+    # and credential_warning_text fields (only the heading differs).
+    explore_later: list[StretchMatch] = []
+    explore_later_ids: set[str] = set()
+    for r in results:
+        if r.job_id in apply_today_ids or r.job_id in worth_a_try_ids:
+            continue
+        if r.job_id in explore_later_ids:
+            continue
+        if len(explore_later) >= explore_later_cap:
+            break
+        if not _in_target_noc_family(r.noc_code, target_noc):
+            continue
+        training_for_job = training_map.get(r.job_id)
+        if not _is_explore_later(r, training_for_job):
+            continue
+        explore_later.append(_project_to_stretch(r, training_for_job))
+        explore_later_ids.add(r.job_id)
+
     # --- Sideways move ---
-    excluded = apply_today_ids | worth_a_try_ids
+    excluded = apply_today_ids | worth_a_try_ids | explore_later_ids
     sideways = enrich_accepted_adjacency_jobs(
         accepted_adjacent,
         user_rows,
@@ -912,4 +1075,5 @@ def build_tiered_evidence(
         apply_today=tuple(apply_today),
         worth_a_try=tuple(worth_a_try),
         sideways_move=tuple(sideways),
+        explore_later=tuple(explore_later),
     )

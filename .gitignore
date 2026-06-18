@@ -27,6 +27,16 @@ check_raw.py
 check_raw_jobs.py
 refresh_active.py
 
+# Local dev/inspection scripts created during 2026-06-17 v6 work
+check_strong_candidates.py
+generate_test_resume.py
+test_resume_pattern_2.pdf
+generate_demo_resume.py
+test_resume_demo.pdf
+generate_demo_resume_v2.py
+test_resume_demo_v2.pdf
+check_demo_closing_dates.py
+
 # Editor / harness state
 .claude/
 shadow.log

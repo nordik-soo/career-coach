@@ -503,10 +503,14 @@ def test_renderer_reads_only_prompt_tiered_slots():
 # Header wording is exact (locked)
 # =========================================================================
 def test_locked_header_strings():
-    """Fix 1 (post-step-10 review): Worth-a-try heading no longer
-    implies a single gap. A job can have multiple required gaps."""
-    assert _HEADER_APPLY_TODAY == "**Apply today — your skills line up**"
-    assert _HEADER_WORTH_A_TRY == "**Worth a try — close, with gaps to address**"
+    """scoring-v6 (2026-06-17): headings renamed to the 4-label
+    vocabulary. _HEADER_APPLY_TODAY now reads "Strong match — apply
+    today"; _HEADER_WORTH_A_TRY now reads "Stretch — reachable with
+    prep". The Sideways heading is unchanged for now (may rename in
+    Step 8 when CP5 wiring lands). Constant names kept stable so
+    fallback call sites elsewhere in the renderer continue working."""
+    assert _HEADER_APPLY_TODAY == "**Strong match — apply today**"
+    assert _HEADER_WORTH_A_TRY == "**Stretch — reachable with prep**"
     assert _HEADER_SIDEWAYS == "**Sideways move — same skills, different angle**"
 
 

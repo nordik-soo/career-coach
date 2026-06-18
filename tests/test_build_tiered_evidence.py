@@ -196,26 +196,30 @@ def test_good_band_no_gaps_is_apply_today():
     assert len(out.apply_today) == 1
 
 
-def test_strong_band_with_required_gap_lands_in_worth_a_try():
-    """CP3 step 2 (2026-06-15): a strong-band match with a real
-    required gap belongs in Worth a try. Apply today still requires
-    `required_missing == []`, so a strong-with-gap record cannot be
-    Apply today, but it must not fall off the tier surface either —
-    it lands in Worth a try (there's a specific gap to close first,
-    regardless of how well the overall score lined up).
+def test_strong_band_with_one_learnable_gap_stays_in_apply_today():
+    """scoring-v6 (2026-06-17): a strong-band match with a SINGLE
+    learnable gap is now Apply-today, not Worth-a-try. The v5 rule
+    that demoted ANY strong-band record with a non-empty
+    required_missing has been replaced: under the new classifier,
+    strong/good band with <=2 learnable gaps stays in Apply-today
+    (the gap shows as a heads-up inside the card body, not a
+    tier-level demotion). Sage 50 is software, not a credential, so
+    it counts as learnable, not blocker. To force a demotion, the
+    posting now needs 3+ learnable gaps, OR a credential blocker,
+    OR a sub-stretch band score.
 
-    Inverts the earlier "falls out of direct tiers entirely" pin: the
-    old behavior dropped these records to the legacy `present_matches`
-    card surface; the new behavior keeps them in the tier prose."""
+    Inverts the earlier CP3-step-2 pin which assumed every gap
+    demotes — that was the bug the live accounting-clerk turn
+    surfaced on 2026-06-17."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [_result(job_id="x", band="strong",
                  missing=["Sage 50"], required_missing=["Sage 50"])],
         [], rows, ids, names, canons,
     )
-    assert out.apply_today == ()
-    assert len(out.worth_a_try) == 1
-    assert out.worth_a_try[0].job_id == "x"
+    assert len(out.apply_today) == 1
+    assert out.apply_today[0].job_id == "x"
+    assert out.worth_a_try == ()
 
 
 def test_stretch_band_no_gaps_not_in_apply_today():
@@ -250,12 +254,17 @@ def test_ineligible_excluded_from_all_direct_tiers():
 # =========================================================================
 # Worth-a-try filter
 # =========================================================================
-def test_good_with_non_credential_gap_is_worth_a_try():
+def test_good_with_three_learnable_gaps_is_worth_a_try():
+    """scoring-v6 (2026-06-17): the v5 fixture (good + 1 non-cred gap)
+    now lands in Apply-today (Good label, learnable count <=2). To
+    keep this test exercising the Worth-a-try path, bump the gap
+    count to 3 — that's the new demotion threshold for high/mid
+    band into Stretch."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [_result(job_id="w1", band="good",
-                 missing=["invoice processing"],
-                 required_missing=["invoice processing"])],
+                 missing=["invoice processing", "tax filing", "audit prep"],
+                 required_missing=["invoice processing", "tax filing", "audit prep"])],
         [], rows, ids, names, canons,
     )
     assert len(out.worth_a_try) == 1
@@ -309,11 +318,15 @@ def test_credential_only_gap_with_training_is_included():
     assert len(out.worth_a_try) == 1
 
 
-def test_mixed_gaps_without_credential_training_excluded():
-    """Fix 2 (step-8 review): a mixed gap profile (credential +
-    non-credential) is NOT Worth a Try when the credential lacks
-    training. The non-credential gap is addressable but the
-    credential is a blocker — the job is not actionable end-to-end."""
+def test_mixed_gaps_without_credential_training_now_admitted_to_worth_a_try():
+    """scoring-v6 (2026-06-17): the v5 "Fix 2" rule excluded mixed
+    cred + non-cred gap profiles entirely when the cred had no
+    training. Under the user-always-gets-something principle, that
+    over-blocked: the job still has an actionable path (work on the
+    non-cred gap; pursue the cred separately). The new classifier
+    keeps the "actionable nothing" filter ONLY for cred-ONLY profiles
+    without training. Mixed profiles enter classification normally:
+    band=good + 1 blocker + 1 learnable → Stretch label → Worth-a-try."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [_result(band="good",
@@ -322,7 +335,7 @@ def test_mixed_gaps_without_credential_training_excluded():
         [], rows, ids, names, canons,
         training_by_job={},
     )
-    assert out.worth_a_try == ()
+    assert len(out.worth_a_try) == 1
 
 
 def test_mixed_gaps_with_credential_training_included():
@@ -374,11 +387,14 @@ def test_sideways_excludes_apply_today_job_ids():
 
 
 def test_sideways_excludes_worth_a_try_job_ids():
+    """scoring-v6 (2026-06-17): bumped the gap count to 3 so the
+    fixture still lands in Worth-a-try under the new classifier
+    (1 learnable gap with good band would now be Apply-today)."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [_result(job_id="overlap", band="good",
-                 missing=["invoice processing"],
-                 required_missing=["invoice processing"])],
+                 missing=["invoice processing", "tax filing", "audit prep"],
+                 required_missing=["invoice processing", "tax filing", "audit prep"])],
         [_accepted_adj(job_id="overlap")],
         rows, ids, names, canons,
     )
@@ -403,11 +419,15 @@ def test_apply_today_capped_at_three():
 
 
 def test_worth_a_try_capped_at_two():
+    """scoring-v6 (2026-06-17): bumped to 3 learnable gaps per
+    fixture so they actually land in Worth-a-try under the new
+    classifier (single-gap good-band fixtures would all be
+    Apply-today now)."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [
             _result(job_id=f"w{i}", band="good",
-                    missing=["x"], required_missing=["x"])
+                    missing=["x", "y", "z"], required_missing=["x", "y", "z"])
             for i in range(4)
         ],
         [], rows, ids, names, canons,
@@ -454,10 +474,14 @@ def test_apply_today_preserves_input_order():
 
 
 def test_worth_a_try_preserves_input_order():
+    """scoring-v6 (2026-06-17): "z" needs 3 learnable gaps to land in
+    Worth-a-try (good+1 gap is now Apply-today). "a" stays as is
+    (stretch-band auto-qualifies for Worth-a-try)."""
     rows, ids, names, canons = _base_inputs()
     results = [
         _result(job_id="z", band="good",
-                missing=["x"], required_missing=["x"]),
+                missing=["x", "y2", "y3"],
+                required_missing=["x", "y2", "y3"]),
         _result(job_id="a", band="stretch",
                 missing=["y"], required_missing=["y"]),
     ]
@@ -689,11 +713,16 @@ def test_prioritized_gap_blocker_only_for_credentials():
 
 
 def test_prioritized_gap_training_options_mapped_by_for_skill():
+    """scoring-v6 (2026-06-17): bumped to 3 learnable gaps to keep
+    fixture in Worth-a-try under the new classifier (single-gap
+    good-band would be Apply-today). The test intent — verifying
+    training options map correctly to the first prioritized gap —
+    is unchanged."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [_result(job_id="w", band="good",
-                 missing=["account reconciliation"],
-                 required_missing=["account reconciliation"])],
+                 missing=["account reconciliation", "tax filing", "audit prep"],
+                 required_missing=["account reconciliation", "tax filing", "audit prep"])],
         [], rows, ids, names, canons,
         training_by_job={
             "w": [{
@@ -716,11 +745,13 @@ def test_prioritized_gap_training_options_mapped_by_for_skill():
 
 
 def test_prioritized_gap_training_empty_when_no_mapping():
+    """scoring-v6 (2026-06-17): 3 learnable gaps to keep fixture in
+    Worth-a-try."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [_result(band="good",
-                 missing=["unmapped skill"],
-                 required_missing=["unmapped skill"])],
+                 missing=["unmapped skill", "gap2", "gap3"],
+                 required_missing=["unmapped skill", "gap2", "gap3"])],
         [], rows, ids, names, canons,
     )
     gap = out.worth_a_try[0].prioritized_gaps[0]
@@ -728,10 +759,14 @@ def test_prioritized_gap_training_empty_when_no_mapping():
 
 
 def test_prioritized_gap_invalid_format_becomes_none():
+    """scoring-v6 (2026-06-17): 3 learnable gaps to keep fixture in
+    Worth-a-try. The "skill x" gap is the first prioritized gap and
+    keeps the training mapping under test."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [_result(job_id="w", band="good",
-                 missing=["skill x"], required_missing=["skill x"])],
+                 missing=["skill x", "skill y", "skill z"],
+                 required_missing=["skill x", "skill y", "skill z"])],
         [], rows, ids, names, canons,
         training_by_job={
             "w": [{
@@ -956,7 +991,16 @@ def test_fix2_two_credentials_some_with_training_excluded():
     assert out.worth_a_try == ()
 
 
-def test_fix2_two_credentials_both_with_training_included():
+def test_fix2_two_credentials_both_with_training_lands_in_explore_later():
+    """scoring-v6 (2026-06-17): under the new classifier, 2+ blockers
+    demotes the match to Explore-later (regardless of training
+    availability). The v5 rule put it in Worth-a-try as long as both
+    creds had training. The new rule says: 2+ credential walls is too
+    many to coach toward a quick win — Explore-later is the honest
+    label.
+
+    Cred-only-with-training profile still NOT filtered (training is
+    available), just classified at a lower tier."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [_result(job_id="t2", band="good",
@@ -974,7 +1018,9 @@ def test_fix2_two_credentials_both_with_training_included():
             ],
         },
     )
-    assert len(out.worth_a_try) == 1
+    assert out.worth_a_try == ()
+    assert len(out.explore_later) == 1
+    assert out.explore_later[0].job_id == "t2"
 
 
 def test_fix2_strength_claim_credential_path_only_when_training_exists():
@@ -1021,19 +1067,322 @@ def test_fix3_duplicate_result_rows_dedup_in_apply_today():
 
 
 def test_fix3_duplicate_result_rows_dedup_in_worth_a_try():
+    """scoring-v6 (2026-06-17): 3 learnable gaps to keep fixture in
+    Worth-a-try under the new classifier."""
     rows, ids, names, canons = _base_inputs()
     out = build_tiered_evidence(
         [
             _result(job_id="dup", band="good",
-                    missing=["x"], required_missing=["x"]),
+                    missing=["x", "y", "z"],
+                    required_missing=["x", "y", "z"]),
             _result(job_id="dup", band="good",
-                    missing=["x"], required_missing=["x"],
+                    missing=["x", "y", "z"],
+                    required_missing=["x", "y", "z"],
                     title="DIFFERENT TITLE"),
         ],
         [], rows, ids, names, canons,
     )
     assert len(out.worth_a_try) == 1
     assert out.worth_a_try[0].title == "Job One"
+
+
+# =========================================================================
+# scoring-v6 (2026-06-17): 3-signal classifier — direct unit tests
+# =========================================================================
+# These tests target _classify_match_label, the single classifier the
+# tier predicates delegate to. The classifier reads three signals:
+#   - match_band (from score thresholds)
+#   - blocker count (credential gaps)
+#   - learnable count (non-credential gaps)
+# And returns one of {"strong", "good", "stretch", "explore_later"} or
+# None (filtered).
+#
+# These tests are intentionally narrow — one signal, one outcome. They
+# complement the integration tests above (which exercise the full
+# build_tiered_evidence pipeline) by pinning the classifier rules
+# directly. A change to the classifier without a matching change here
+# means the spec moved without the spec being updated — that's the
+# signal we want.
+
+from skillbridge.chat.tiered_evidence import _classify_match_label
+
+
+def _classify(band, score=None, *, missing=None, required_missing=None,
+              eligible=True, training_for_job=None):
+    """Build a minimal MatchResult and run the classifier. Score
+    defaults to a value in the middle of `band`'s range.
+
+    `training_for_job` is forwarded to the classifier — needed when
+    the fixture has credential gaps and we want to exercise the
+    blocker-demotion rule rather than the cred-only-without-training
+    filter. Pass training entries with `url` and `for_skill` keys
+    (just like training_by_job in build_tiered_evidence)."""
+    if score is None:
+        score = {"strong": 0.80, "good": 0.65,
+                 "stretch": 0.45, "low": 0.32}.get(band, 0.50)
+    missing = missing or []
+    required_missing = required_missing if required_missing is not None else []
+    r = MatchResult(
+        job_id="c1", profile_id="p", title="T", employer=None,
+        url=None, location=None,
+        match_score=score, match_band=band, match_eligible=eligible,
+        ineligibility_reason=None,
+        matched_skills=[], missing_skills=missing,
+        matched_skill_ids=[], missing_skill_ids=[],
+        required_skills_count=len(missing),
+        credential_warning=None,
+        posted_date=None, noc_code=None,
+        score_explanation={"required_missing": required_missing},
+        employment_type=None, salary_text=None,
+    )
+    return _classify_match_label(r, training_for_job)
+
+
+def test_classifier_strong_band_no_gaps_returns_strong():
+    assert _classify("strong", missing=[], required_missing=[]) == "strong"
+
+
+def test_classifier_strong_band_with_two_learnable_stays_strong():
+    """The upper bound for "Strong" is 2 learnable gaps. Three or more
+    demotes to Stretch."""
+    assert _classify(
+        "strong",
+        missing=["a", "b"],
+        required_missing=["a", "b"],
+    ) == "strong"
+
+
+def test_classifier_strong_band_with_three_learnable_demotes_to_stretch():
+    """3-4 learnable gaps on a high/mid band score demotes to Stretch.
+    This is the live-bug fix for the 2026-06-17 accounting-clerk
+    test — Lock City Dairies had 4 learnable gaps and was demoted to
+    Stretch (matches user spec)."""
+    assert _classify(
+        "strong",
+        missing=["a", "b", "c"],
+        required_missing=["a", "b", "c"],
+    ) == "stretch"
+
+
+def test_classifier_strong_band_with_five_learnable_demotes_to_explore_later():
+    """5+ learnable gaps means "Explore later" regardless of band —
+    too many to address as a quick win."""
+    assert _classify(
+        "strong",
+        missing=["a", "b", "c", "d", "e"],
+        required_missing=["a", "b", "c", "d", "e"],
+    ) == "explore_later"
+
+
+def test_classifier_strong_band_with_one_blocker_demotes_to_stretch():
+    """One credential blocker (training mapped — cred-only-without-
+    training filter doesn't fire) demotes high/mid band to Stretch.
+    The user can pursue the cred via the mapped training while the
+    rest of their fit stays high — but until they have the cred,
+    this isn't Apply-today."""
+    assert _classify(
+        "strong",
+        missing=["Class G driver's license"],
+        required_missing=["Class G driver's license"],
+        training_for_job=[{
+            "provider": "Sault College", "title": "G License Prep",
+            "url": "https://example.com/g",
+            "for_skill": "Class G driver's license",
+        }],
+    ) == "stretch"
+
+
+def test_classifier_strong_band_with_two_blockers_demotes_to_explore_later():
+    """2+ credential blockers (both with training mapped) demote to
+    Explore-later. Multiple regulatory walls = too many for a quick
+    coaching win, even if training exists for each."""
+    assert _classify(
+        "strong",
+        missing=["Class G driver's license", "WHMIS"],
+        required_missing=["Class G driver's license", "WHMIS"],
+        training_for_job=[
+            {"provider": "P1", "title": "G Prep",
+             "url": "https://example.com/g",
+             "for_skill": "Class G driver's license"},
+            {"provider": "P2", "title": "WHMIS Course",
+             "url": "https://example.com/whmis",
+             "for_skill": "WHMIS"},
+        ],
+    ) == "explore_later"
+
+
+def test_classifier_good_band_no_gaps_returns_good():
+    assert _classify("good", missing=[], required_missing=[]) == "good"
+
+
+def test_classifier_stretch_band_returns_stretch():
+    """Stretch band auto-qualifies for the Stretch label — gap-presence
+    doesn't matter for further demotion within stretch (it's already
+    the demoted band). 5+ learnable still bumps to Explore-later."""
+    assert _classify(
+        "stretch",
+        missing=["x"],
+        required_missing=["x"],
+    ) == "stretch"
+
+
+def test_classifier_low_band_above_floor_returns_explore_later():
+    """Low band (score 0.30-0.39, above the 0.30 visibility floor)
+    surfaces as Explore-later — previously hidden entirely by the
+    responder's eligible-only-low branch. Under the new principle,
+    a partial match deserves an honest "this isn't your main target"
+    label, not silence."""
+    assert _classify(
+        "low", score=0.32,
+        missing=["x"],
+        required_missing=["x"],
+    ) == "explore_later"
+
+
+def test_classifier_below_floor_returns_none():
+    """Below 30% is real noise. Filtered out of all tiers — never
+    surfaced. The user-always-gets-something principle has an honesty
+    guardrail: don't fabricate matches just to fill space."""
+    assert _classify(
+        "low", score=0.25,
+        missing=["x"],
+        required_missing=["x"],
+    ) is None
+
+
+def test_classifier_ineligible_returns_none():
+    """match_eligible=False = engine-side filter already excluded
+    this match. Classifier respects that — never overrides eligibility."""
+    assert _classify(
+        "strong",
+        missing=[],
+        required_missing=[],
+        eligible=False,
+    ) is None
+
+
+def test_classifier_credential_only_without_training_filters_to_none():
+    """Carries forward v5's "actionable nothing" rule: a posting whose
+    ONLY required gap is a credential AND no training is mapped has
+    no path forward (can't apply, can't close). Surfacing it would
+    violate the user-always-gets-something principle's honesty
+    guardrail. With non-credential gaps present alongside, the filter
+    doesn't fire (mixed gap profile has at least one path forward)."""
+    assert _classify(
+        "good",
+        missing=["Class G driver's license"],
+        required_missing=["Class G driver's license"],
+        # training_for_job is None → no training mapped
+    ) is None
+
+
+def test_classifier_fail_closed_when_required_missing_absent():
+    """If score_explanation lacks the required_missing key (engine
+    didn't report), the classifier returns None — we don't admit on
+    missing-data assumption. Same fail-closed posture as v5 predicates."""
+    r = MatchResult(
+        job_id="c1", profile_id="p", title="T", employer=None,
+        url=None, location=None,
+        match_score=0.80, match_band="strong", match_eligible=True,
+        ineligibility_reason=None,
+        matched_skills=[], missing_skills=[],
+        matched_skill_ids=[], missing_skill_ids=[],
+        required_skills_count=0, credential_warning=None,
+        posted_date=None, noc_code=None,
+        score_explanation={},  # absent required_missing
+        employment_type=None, salary_text=None,
+    )
+    assert _classify_match_label(r, None) is None
+
+
+# =========================================================================
+# scoring-v6 (2026-06-17): explore_later slot integration tests
+# =========================================================================
+def test_explore_later_slot_populated_on_low_band():
+    """Low-band (above 30% floor) matches now populate the
+    explore_later slot, where previously they fell off the tier
+    surface entirely (responder's eligible-only-low branch)."""
+    rows, ids, names, canons = _base_inputs()
+    out = build_tiered_evidence(
+        [_result(job_id="el1", band="low",
+                 missing=["x"], required_missing=["x"])],
+        [], rows, ids, names, canons,
+    )
+    # Pre-v6: this match would not appear in any tier (hidden by
+    # responder's eligible-only-low branch). Post-v6: appears in the
+    # new Explore-later tier.
+    assert len(out.explore_later) == 1
+    assert out.explore_later[0].job_id == "el1"
+    # Direct tiers stay empty for this profile.
+    assert out.apply_today == ()
+    assert out.worth_a_try == ()
+
+
+def test_explore_later_excludes_apply_today_job_ids():
+    """Cross-tier exclusivity: a job that qualifies for Apply-today
+    must not also appear in Explore-later (even though both could
+    technically read the same match if the classifier mis-fired)."""
+    rows, ids, names, canons = _base_inputs()
+    out = build_tiered_evidence(
+        [_result(job_id="dup", band="strong", required_missing=[])],
+        [], rows, ids, names, canons,
+    )
+    assert len(out.apply_today) == 1
+    assert out.explore_later == ()
+
+
+def test_explore_later_capped_at_two():
+    """Default cap is 2 (same as worth_a_try cap)."""
+    rows, ids, names, canons = _base_inputs()
+    out = build_tiered_evidence(
+        [
+            _result(job_id=f"el{i}", band="low",
+                    missing=["x"], required_missing=["x"])
+            for i in range(5)
+        ],
+        [], rows, ids, names, canons,
+    )
+    assert len(out.explore_later) == 2
+
+
+def test_explore_later_cap_overridable_via_kwarg():
+    rows, ids, names, canons = _base_inputs()
+    out = build_tiered_evidence(
+        [
+            _result(job_id=f"el{i}", band="low",
+                    missing=["x"], required_missing=["x"])
+            for i in range(5)
+        ],
+        [], rows, ids, names, canons,
+        explore_later_cap=1,
+    )
+    assert len(out.explore_later) == 1
+
+
+def test_explore_later_preserves_input_order():
+    rows, ids, names, canons = _base_inputs()
+    results = [
+        _result(job_id="z", band="low",
+                missing=["x"], required_missing=["x"]),
+        _result(job_id="a", band="low",
+                missing=["y"], required_missing=["y"]),
+    ]
+    out = build_tiered_evidence(results, [], rows, ids, names, canons)
+    assert [m.job_id for m in out.explore_later] == ["z", "a"]
+
+
+def test_sideways_excludes_explore_later_job_ids():
+    """Cross-tier exclusivity extended to the new slot: a job_id in
+    Explore-later must not also appear as a Sideways adjacency."""
+    rows, ids, names, canons = _base_inputs()
+    out = build_tiered_evidence(
+        [_result(job_id="overlap", band="low",
+                 missing=["x"], required_missing=["x"])],
+        [_accepted_adj(job_id="overlap")],
+        rows, ids, names, canons,
+    )
+    assert len(out.explore_later) == 1
+    assert out.sideways_move == ()
 
 
 def test_fix3_duplicate_accepted_adjacent_dedup_in_sideways():

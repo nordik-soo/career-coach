@@ -545,6 +545,16 @@ class SanitizedResponderView:
     prompt_tiered_sideways_move: tuple[PromptAdjacentJob, ...] = field(
         default_factory=tuple
     )
+    # scoring-v6 (2026-06-17): new fourth direct-target tier surfacing
+    # the engine's low-band (30-39%) matches that were previously
+    # hidden by the responder's eligible-only-low branch. Same
+    # projection shape as worth_a_try (a StretchMatch carries the
+    # right fields), but rendered under the "Explore later — not
+    # your main target" heading per the closing-matrix v2 design.
+    # Default-empty so existing builders construct without modification.
+    prompt_tiered_explore_later: tuple[PromptStretchMatch, ...] = field(
+        default_factory=tuple
+    )
 
     def __post_init__(self) -> None:
         # Enforce that the Mapping field is structurally immutable.
@@ -2045,6 +2055,15 @@ def build_sanitized_responder_view_for_tiered_matches(
     worth_a_try = tuple(
         _project_stretch_match(m) for m in tier_evidence.worth_a_try
     )
+    # scoring-v6 (2026-06-17): the new fourth direct-target tier.
+    # tier_evidence.explore_later carries StretchMatch records the
+    # classifier labeled "explore_later" (band="low" above 30% floor,
+    # OR >=5 learnable gaps, OR >=2 blockers). Same projection helper
+    # as worth_a_try — they share field shape; only the heading the
+    # LLM renders under differs.
+    explore_later = tuple(
+        _project_stretch_match(m) for m in tier_evidence.explore_later
+    )
     sideways = tuple(
         _project_adjacent_job(a) for a in tier_evidence.sideways_move
     )
@@ -2052,9 +2071,11 @@ def build_sanitized_responder_view_for_tiered_matches(
     # prompt_urls covers every renderable URL on every tier item.
     # _collect_canonical_urls walks PromptStretchMatch into its
     # prioritized_gaps[].training_options[] automatically (see the
-    # type-specific branch added in step 9).
+    # type-specific branch added in step 9). scoring-v6 (2026-06-17):
+    # explore_later carries the same StretchMatch shape, so the same
+    # walker covers its URLs — pass it alongside the other tiers.
     prompt_urls = _collect_canonical_urls(
-        apply_today, worth_a_try, sideways,
+        apply_today, worth_a_try, explore_later, sideways,
     )
     # AR-9.feat.coach-tiers step 10: fallback_urls is recomputed from
     # exactly the URLs the deterministic fallback renderer would emit.
@@ -2090,6 +2111,7 @@ def build_sanitized_responder_view_for_tiered_matches(
         prompt_tiered_apply_today=apply_today,
         prompt_tiered_worth_a_try=worth_a_try,
         prompt_tiered_sideways_move=sideways,
+        prompt_tiered_explore_later=explore_later,
     )
     fallback_urls = collect_fallback_render_urls(_probe_view)
 
@@ -2113,4 +2135,5 @@ def build_sanitized_responder_view_for_tiered_matches(
         prompt_tiered_apply_today=apply_today,
         prompt_tiered_worth_a_try=worth_a_try,
         prompt_tiered_sideways_move=sideways,
+        prompt_tiered_explore_later=explore_later,
     )
