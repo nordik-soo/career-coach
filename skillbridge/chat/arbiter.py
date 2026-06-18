@@ -205,6 +205,19 @@ ARBITER_REASON_ADJACENT_RECOMMENDATIONS = "adjacent_recommendations_user_request
 ARBITER_REASON_ADJACENT_DESCRIPTION = "adjacent_ordinal_followup"
 
 
+# Slice C (2026-06-18): readiness reasons that are SAFE to suppress
+# the fresh-intake-on-target-change override against. Both come from
+# objective resume parsing -- they're not collected for a specific
+# target, so they don't go stale on a target change. Chat-collected
+# reasons (chat_skills_sufficient, user_explicitly_asked_to_match,
+# skills_only_explicit_request) are NOT in this set; the override
+# still fires for them because chat evidence CAN be stale-target.
+_RESUME_BASED_READINESS_REASONS: frozenset[str] = frozenset({
+    "resume_skills_sufficient",
+    "resume_work_history_present",
+})
+
+
 # =========================================================================
 # Decision shapes
 # =========================================================================
@@ -413,22 +426,38 @@ def validate_planner_intent(
         # = True) but it was collected for a PRIOR target_role_text. The
         # locked design says the engine must not run on stale-target
         # evidence — re-ask for the misaligned slot first.
+        #
+        # Slice C (2026-06-18): suppress the fresh-intake override when
+        # readiness came from RESUME-based evidence. Resume skills and
+        # resume work history are OBJECTIVE facts from the CV -- they
+        # were not "collected for the prior target," so they're not
+        # stale on a target change. Asking the user to re-state skills
+        # they already gave us in their resume is what caused the live
+        # bug in James's session (Turn 2: target=admin assistant, resume
+        # uploaded, system asked for skills_text instead of running
+        # engine). Chat-collected skills remain protected by this
+        # override -- those CAN be stale-target.
         if not truth.get("target_alignment_ok", True):
-            misaligned_slot = truth.get(
-                "target_alignment_first_misaligned_slot"
-            ) or "skills_text"
-            return ArbiterDecision(
-                final_move="ask_one_clarifying_question",
-                reason_code="target_changed_need_fresh_intake",
-                tone="warm_supportive",
-                arbiter_action="overrode_to_ask",
-                ask_slot=misaligned_slot,
-                notes=(
-                    "planner said proceed but truth.target_alignment_ok=false; "
-                    f"asking for {misaligned_slot!r} against the new "
-                    f"target_role_text={truth.get('target_role_text')!r}"
-                ),
-            )
+            if truth.get(
+                "enough_to_match_reason"
+            ) in _RESUME_BASED_READINESS_REASONS:
+                pass  # fall through to RunEngine below
+            else:
+                misaligned_slot = truth.get(
+                    "target_alignment_first_misaligned_slot"
+                ) or "skills_text"
+                return ArbiterDecision(
+                    final_move="ask_one_clarifying_question",
+                    reason_code="target_changed_need_fresh_intake",
+                    tone="warm_supportive",
+                    arbiter_action="overrode_to_ask",
+                    ask_slot=misaligned_slot,
+                    notes=(
+                        "planner said proceed but truth.target_alignment_ok=false; "
+                        f"asking for {misaligned_slot!r} against the new "
+                        f"target_role_text={truth.get('target_role_text')!r}"
+                    ),
+                )
         # Cleared -- the handler runs the engine and calls Pass 2.
         return RunEngine(
             planner_reason_code=decision.reason_code,

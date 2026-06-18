@@ -348,3 +348,78 @@ def test_arbiter_allows_proceed_when_alignment_ok():
     truth = _truth_with_alignment(alignment_ok=True, first_misaligned=None)
     out = validate_planner_intent(_planner_proceed(), truth)
     assert isinstance(out, RunEngine)
+
+
+# ============================================================================
+# Slice C (2026-06-18) — resume-based readiness suppresses fresh-intake
+# ============================================================================
+def _truth_with_alignment_and_reason(
+    *,
+    alignment_ok: bool,
+    first_misaligned: str | None,
+    enough_to_match_reason: str,
+):
+    """Like _truth_with_alignment but also sets the readiness reason
+    code. Used to exercise Slice C's guard."""
+    base = _truth_with_alignment(
+        alignment_ok=alignment_ok, first_misaligned=first_misaligned,
+    )
+    base["enough_to_match_reason"] = enough_to_match_reason
+    return base
+
+
+def test_slice_c_resume_skills_sufficient_suppresses_fresh_intake_override():
+    """Slice C: resume-sourced readiness IS objective evidence -- it
+    doesn't go stale on a target change. The fresh-intake override
+    should fall through to RunEngine in this case. This is the live
+    bug Turn 2 from James's session exposed."""
+    truth = _truth_with_alignment_and_reason(
+        alignment_ok=False,
+        first_misaligned="skills_text",
+        enough_to_match_reason="resume_skills_sufficient",
+    )
+    out = validate_planner_intent(_planner_proceed(), truth)
+    assert isinstance(out, RunEngine), (
+        "resume_skills_sufficient should suppress the fresh-intake "
+        f"override; got ArbiterDecision instead: {out!r}"
+    )
+
+
+def test_slice_c_resume_work_history_present_suppresses_fresh_intake_override():
+    """Slice C: same suppression for resume work history."""
+    truth = _truth_with_alignment_and_reason(
+        alignment_ok=False,
+        first_misaligned="experience_text",
+        enough_to_match_reason="resume_work_history_present",
+    )
+    out = validate_planner_intent(_planner_proceed(), truth)
+    assert isinstance(out, RunEngine)
+
+
+def test_slice_c_chat_skills_sufficient_does_NOT_suppress_fresh_intake_override():
+    """Slice C boundary: chat-collected skills CAN be stale-target,
+    so the fresh-intake override MUST still fire for them. This is
+    the protection the pillar was designed for in the first place."""
+    truth = _truth_with_alignment_and_reason(
+        alignment_ok=False,
+        first_misaligned="skills_text",
+        enough_to_match_reason="chat_skills_sufficient",
+    )
+    out = validate_planner_intent(_planner_proceed(), truth)
+    assert isinstance(out, ArbiterDecision)
+    assert out.final_move == "ask_one_clarifying_question"
+    assert out.reason_code == "target_changed_need_fresh_intake"
+    assert out.ask_slot == "skills_text"
+
+
+def test_slice_c_user_explicitly_asked_to_match_does_NOT_suppress_fresh_intake():
+    """Slice C boundary: impatient_proceed override is not safe to
+    suppress -- the readiness could be backed by chat-only skills."""
+    truth = _truth_with_alignment_and_reason(
+        alignment_ok=False,
+        first_misaligned="skills_text",
+        enough_to_match_reason="user_explicitly_asked_to_match",
+    )
+    out = validate_planner_intent(_planner_proceed(), truth)
+    assert isinstance(out, ArbiterDecision)
+    assert out.reason_code == "target_changed_need_fresh_intake"
