@@ -189,7 +189,7 @@ def test_pass1_proceed_overridden_when_enough_to_match_false():
     decision = _planner(move="proceed_to_match")
     truth = _truth(
         enough_to_match=False,
-        enough_to_match_reason="target_role_not_specific",
+        enough_to_match_reason="missing_target",
         usable_evidence_present=True,
         target_role_text=None,
         target_role_specificity="none",

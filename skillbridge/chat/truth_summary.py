@@ -499,9 +499,28 @@ def _compute_enough_to_match(
     # scores by skill overlap regardless of target_noc, so no NOC
     # anchor is required.
     if target_role_specificity != "specific":
-        if chat_skill_count >= 3 or counts.skill_count >= 5:
-            return True, "skills_only_sufficient", usable_evidence_present
-        return False, "target_role_not_specific", usable_evidence_present
+        # A1 (2026-06-18): missing/vague target now defaults to "ask"
+        # for the target. Prior behavior ran the engine in skills-only
+        # mode on any neutral/confirming turn with decent evidence,
+        # which produced CP4 silent failures (no target NOC -> no
+        # recommendation possible) and cascading degradation in the
+        # closing rules. The skills-only path is preserved ONLY when
+        # the user EXPLICITLY asked to skip target-setting ("show
+        # jobs based on my skills", "see my cv", "just match me") --
+        # captured by the existing `impatient_proceed` intent.
+        #
+        # Caution for Slice B/C: `impatient_proceed` is broad. It also
+        # matches "go ahead", "let's go", "same role". For A1 that is
+        # acceptable because the branch only fires when the target is
+        # missing/vague AND evidence is strong -- a narrow combination.
+        # If live tests show false positives (user got matched without
+        # really wanting skills-only mode), B/C should introduce a
+        # tighter explicit-skills-only signal.
+        if user_intent_signal == "impatient_proceed" and (
+            chat_skill_count >= 3 or counts.skill_count >= 5
+        ):
+            return True, "skills_only_explicit_request", usable_evidence_present
+        return False, "missing_target", usable_evidence_present
 
     # Step 3: evidence guard must pass.
     if not usable_evidence_present:

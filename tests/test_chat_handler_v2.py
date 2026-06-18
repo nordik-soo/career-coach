@@ -365,7 +365,7 @@ def test_v2_engine_not_called_when_planner_says_proceed_but_truth_says_not_enoug
     def fake_build(*, staged, user_message, **kw):
         result = real_build(staged=staged, user_message=user_message, **kw)
         object.__setattr__(result, "enough_to_match", False)
-        object.__setattr__(result, "enough_to_match_reason", "target_role_not_specific")
+        object.__setattr__(result, "enough_to_match_reason", "missing_target")
         object.__setattr__(result, "usable_evidence_present", True)
         return result
     monkeypatch.setattr(handler, "build_truth_summary", fake_build)

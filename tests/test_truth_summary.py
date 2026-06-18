@@ -566,11 +566,12 @@ def test_resume_quality_partial_when_only_one_group():
 # ---------------------------------------------------------------------------
 # _compute_enough_to_match -- the load-bearing guard
 # ---------------------------------------------------------------------------
-def test_enough_to_match_true_when_target_unspecified_but_skills_strong():
-    """CP3 step 1 (2026-06-15): skills-only path. A user with strong
-    skill evidence and NO specific target should match — the engine
-    scores by skill overlap regardless of target_noc. Threshold:
-    resume skill_count >= 5 OR chat_skill_count >= 3."""
+def test_enough_to_match_true_when_target_unspecified_but_skills_strong_and_explicit_intent():
+    """A1 (2026-06-18): skills-only path now requires EXPLICIT intent.
+    A user with strong skill evidence, NO specific target, AND
+    `impatient_proceed` intent ("show jobs based on my skills") still
+    gets engine-run. Without the explicit intent, the same evidence
+    shape would route to ASK-for-target instead."""
     enough, reason, usable = _compute_enough_to_match(
         target_role_specificity="none",
         resume_parse_quality="full",
@@ -579,13 +580,16 @@ def test_enough_to_match_true_when_target_unspecified_but_skills_strong():
         user_intent_signal="impatient_proceed",
     )
     assert enough is True
-    assert reason == "skills_only_sufficient"
+    assert reason == "skills_only_explicit_request"
     assert usable is True
 
 
-def test_enough_to_match_true_when_target_vague_but_skills_strong():
-    """Same path applies for vague targets — engine still has skill
-    evidence to work with."""
+def test_enough_to_match_false_when_target_vague_and_neutral_intent():
+    """A1 (2026-06-18): vague target + neutral intent now defaults to
+    ASK-for-target, even when skill evidence is strong. Prior behavior
+    ran the engine in skills-only mode; the bug it caused was CP4
+    silent failures because the engine had no target NOC to anchor
+    recommendations."""
     enough, reason, _ = _compute_enough_to_match(
         target_role_specificity="vague",
         resume_parse_quality="full",
@@ -593,8 +597,8 @@ def test_enough_to_match_true_when_target_vague_but_skills_strong():
         chat_skill_count=0,
         user_intent_signal="neutral",
     )
-    assert enough is True
-    assert reason == "skills_only_sufficient"
+    assert enough is False
+    assert reason == "missing_target"
 
 
 def test_enough_to_match_false_when_target_unspecified_and_skills_thin():
@@ -608,12 +612,14 @@ def test_enough_to_match_false_when_target_unspecified_and_skills_thin():
         user_intent_signal="neutral",
     )
     assert enough is False
-    assert reason == "target_role_not_specific"
+    assert reason == "missing_target"
 
 
-def test_enough_to_match_true_when_target_unspecified_and_chat_skills_only():
-    """chat_skill_count >= 3 alone is enough for the skills-only
-    path even without a resume."""
+def test_enough_to_match_false_when_target_unspecified_and_chat_skills_only_without_explicit_intent():
+    """A1 (2026-06-18): chat_skill_count >= 3 alone is NO LONGER
+    enough to fire skills-only mode. Without `impatient_proceed`
+    intent (the user explicitly asking to skip target-setting), the
+    default is to ASK for a target."""
     enough, reason, _ = _compute_enough_to_match(
         target_role_specificity="none",
         resume_parse_quality="no_resume",
@@ -621,8 +627,38 @@ def test_enough_to_match_true_when_target_unspecified_and_chat_skills_only():
         chat_skill_count=5,
         user_intent_signal="neutral",
     )
+    assert enough is False
+    assert reason == "missing_target"
+
+
+def test_enough_to_match_true_when_target_unspecified_and_chat_skills_with_explicit_intent():
+    """A1 (2026-06-18): the chat-skills-only path SURVIVES when the
+    user EXPLICITLY asks to skip target-setting. This is the legitimate
+    "what jobs match my skills?" exploration mode."""
+    enough, reason, _ = _compute_enough_to_match(
+        target_role_specificity="none",
+        resume_parse_quality="no_resume",
+        counts=ResumeFactsSummary(),
+        chat_skill_count=5,
+        user_intent_signal="impatient_proceed",
+    )
     assert enough is True
-    assert reason == "skills_only_sufficient"
+    assert reason == "skills_only_explicit_request"
+
+
+def test_enough_to_match_true_when_target_vague_and_explicit_intent():
+    """A1 (2026-06-18): vague target + `impatient_proceed` intent +
+    strong resume skills also fires skills-only mode. The vague-target
+    user who EXPLICITLY says "just match me" gets matched."""
+    enough, reason, _ = _compute_enough_to_match(
+        target_role_specificity="vague",
+        resume_parse_quality="full",
+        counts=ResumeFactsSummary(skill_count=10),
+        chat_skill_count=0,
+        user_intent_signal="impatient_proceed",
+    )
+    assert enough is True
+    assert reason == "skills_only_explicit_request"
 
 
 def test_enough_to_match_false_with_failed_resume_and_impatience():
