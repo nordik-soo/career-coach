@@ -104,6 +104,12 @@ def _collect_pending_flags(staged: StagedProfile) -> frozenset[str]:
         flags.add("training_topic")
     if staged.pending_adjacent_search_offer:
         flags.add("adjacent_search_offer")
+    # Slice 5 step 2 (2026-06-18): conversational recommender pending
+    # offer. Mirrors the handler's _count_entry_pending_flags exactly
+    # -- both helpers count the same flags so A2-α3 and DerivedTurnState
+    # agree on pending state.
+    if staged.pending_recommender_offer is not None:
+        flags.add("recommender_offer")
     return frozenset(flags)
 
 

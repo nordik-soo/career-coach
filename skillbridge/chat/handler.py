@@ -4098,12 +4098,18 @@ def _is_bare_yes_no_response(message: str, intent: str) -> bool:
 
 
 def _count_entry_pending_flags(staged: StagedProfile) -> int:
-    """Counts the four formal pending fields on staged. Called at
+    """Counts the formal pending fields on staged. Called at
     handle_anonymous entry, BEFORE any clearing code runs. Same
     counting logic as turn_state._collect_pending_flags (Slice B);
     duplicated here to keep A2-α3 independent of Slice B per the
     locked decision not to thread DerivedTurnState through the
-    handler lifecycle yet."""
+    handler lifecycle yet.
+
+    Slice 5 step 2 (2026-06-18): pending_recommender_offer joins the
+    count so a bare yes with this flag + ANY other pending flag
+    triggers A2-α3's ambiguity guard. When this is the SOLE pending
+    flag (count == 1), bare yes routes normally through the existing
+    per-flag handler -- meaning Step 4 wiring becomes unambiguous."""
     count = 0
     if staged.pending_credential_confirmation is not None:
         count += 1
@@ -4112,6 +4118,8 @@ def _count_entry_pending_flags(staged: StagedProfile) -> int:
     if staged.pending_training_topic:
         count += 1
     if staged.pending_adjacent_search_offer:
+        count += 1
+    if staged.pending_recommender_offer is not None:
         count += 1
     return count
 

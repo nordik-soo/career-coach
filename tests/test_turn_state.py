@@ -195,6 +195,46 @@ def test_pending_adjacent_search_offer_detected():
     assert state.pending_count == 1
 
 
+def test_pending_recommender_offer_detected_for_each_mode():
+    """Slice 5 step 2 (2026-06-18): _collect_pending_flags includes
+    'recommender_offer' whenever pending_recommender_offer is set to
+    any of the three canonical RecommenderMode values. The flag value
+    itself (which mode) is not exposed in DerivedTurnState -- only the
+    presence/absence and the count."""
+    for mode in ("local_gap_coach", "target_noc_standard",
+                 "adjacent_noc_standard"):
+        sp = _staged()
+        sp.pending_recommender_offer = mode
+        state = derive_turn_state(truth=_truth(), staged=sp)
+        assert state.pending_flags_active == frozenset(
+            {"recommender_offer"}
+        ), f"mode={mode!r} did not produce a single recommender_offer flag"
+        assert state.pending_count == 1
+
+
+def test_pending_recommender_offer_not_in_flags_when_none():
+    sp = _staged()
+    sp.pending_recommender_offer = None
+    state = derive_turn_state(truth=_truth(), staged=sp)
+    assert "recommender_offer" not in state.pending_flags_active
+    assert state.pending_count == 0
+
+
+def test_pending_recommender_offer_plus_another_flag_counts_two():
+    """Critical for A2-α3 interaction: when pending_recommender_offer
+    is active AND another pending flag is also active, the count
+    reaches 2. A2-α3's ambiguity guard (count != 1) then triggers on
+    a bare yes -- preventing the next-turn handler from silently
+    routing to one flag while the user meant the other."""
+    sp = _staged(pending_adjacent_offer=True)
+    sp.pending_recommender_offer = "local_gap_coach"
+    state = derive_turn_state(truth=_truth(), staged=sp)
+    assert state.pending_count == 2
+    assert state.pending_flags_active == frozenset(
+        {"adjacent_offer", "recommender_offer"}
+    )
+
+
 def test_pending_count_reflects_multiple_active_flags():
     """The ambiguous-yes case: two flags both expecting yes/no input.
     Slice A2 will use pending_count > 1 to ASK rather than guess."""

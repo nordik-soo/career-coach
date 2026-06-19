@@ -3090,6 +3090,7 @@ def _stage_with_pending(
     adjacent_offer: bool = False,
     training_topic: bool = False,
     adjacent_search_offer: bool = False,
+    recommender_offer: str | None = None,
 ) -> StagedProfile:
     """Build a staged profile pre-loaded with the requested pending
     flags. Used to exercise A2-α3's entry-time count."""
@@ -3104,6 +3105,7 @@ def _stage_with_pending(
     sp.pending_adjacent_offer = adjacent_offer
     sp.pending_training_topic = training_topic
     sp.pending_adjacent_search_offer = adjacent_search_offer
+    sp.pending_recommender_offer = recommender_offer
     return sp
 
 
@@ -3244,3 +3246,79 @@ def test_a2_skipped_when_uploaded_file_is_present(monkeypatch):
         "A2-α3 must skip when uploaded_file=True -- file upload "
         "supersedes message-level ambiguity."
     )
+
+
+# ===========================================================================
+# Slice 5 step 2 (2026-06-18) -- A2-α3 + pending_recommender_offer
+# ===========================================================================
+# When pending_recommender_offer is the ONLY pending flag, A2-α3 must
+# NOT intercept -- the bare yes is unambiguous (it answers the single
+# pending recommender offer; Step 4 will define the consume route).
+#
+# When pending_recommender_offer is set ALONGSIDE another pending flag,
+# A2-α3 MUST intercept -- the bare yes could resolve either question.
+def test_a2_does_NOT_intercept_when_only_pending_recommender_offer(
+    monkeypatch,
+):
+    """Solo pending_recommender_offer + bare yes -> normal flow, no
+    disambiguation. The downstream consume route (Step 4) will handle
+    the yes."""
+    staged = _stage_with_pending(recommender_offer="local_gap_coach")
+    extractor_spy, _, _ = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+
+    response = handler.handle_anonymous(
+        message="yes", session_id=staged.session_id,
+    )
+
+    assert _A2_DISAMBIGUATION_PHRASE not in response["reply"], (
+        "A2-α3 must NOT intercept when pending_recommender_offer is "
+        "the ONLY pending flag -- the bare yes unambiguously answers it."
+    )
+
+
+def test_a2_intercepts_bare_yes_when_recommender_offer_plus_adjacent_offer(
+    monkeypatch,
+):
+    """pending_recommender_offer + pending_adjacent_offer both pending
+    -> a bare yes is ambiguous (could answer either) -> A2-α3 fires."""
+    staged = _stage_with_pending(
+        adjacent_offer=True,
+        recommender_offer="local_gap_coach",
+    )
+    extractor_spy, _, planner_calls = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+
+    response = handler.handle_anonymous(
+        message="yes", session_id=staged.session_id,
+    )
+
+    assert _A2_DISAMBIGUATION_PHRASE in response["reply"]
+    # Both flags MUST stay set -- A2-α3 doesn't mutate pending state.
+    assert staged.pending_adjacent_offer is True
+    assert staged.pending_recommender_offer == "local_gap_coach"
+    # No extractor / planner work; intercept happens before either.
+    assert extractor_spy.calls == 0
+    assert len(planner_calls) == 0
+
+
+def test_a2_intercepts_bare_yes_when_recommender_offer_plus_credential(
+    monkeypatch,
+):
+    """Same boundary test with credential confirmation: two pending
+    yes/no-eligible flags + bare yes -> ambiguity guard fires."""
+    staged = _stage_with_pending(
+        credential=True,
+        recommender_offer="local_gap_coach",
+    )
+    extractor_spy, _, _ = _patch_handle_anonymous_deps(
+        monkeypatch, staged=staged,
+    )
+
+    response = handler.handle_anonymous(
+        message="yes", session_id=staged.session_id,
+    )
+
+    assert _A2_DISAMBIGUATION_PHRASE in response["reply"]

@@ -740,3 +740,138 @@ def test_handler_non_blank_message_consumes_flag(monkeypatch) -> None:
     resp = handler.handle_anonymous("hi there", sid)
     assert isinstance(resp, dict)
     assert store.load(sid).pending_adjacent_offer is False
+
+
+# ===========================================================================
+# Slice 5 step 2 (2026-06-18) -- pending_recommender_offer plumbing
+# ===========================================================================
+# State field + lifecycle ONLY:
+#   - default value is None
+#   - accepts the three RecommenderMode strings
+#   - resets to None on target_role_text change
+#   - sanitized at from_json (invalid string / non-str / unknown mode -> None)
+#   - lossless cookie minification when at default (None)
+#   - non-default values survive round-trip
+#
+# NO SET point and NO consumer in this slice; those land in Step 4.
+def test_pending_recommender_offer_default_is_none() -> None:
+    s = StagedProfile.new("sess-1")
+    assert s.pending_recommender_offer is None
+
+
+def test_pending_recommender_offer_accepts_local_gap_coach() -> None:
+    s = StagedProfile.new("sess-1")
+    s.pending_recommender_offer = "local_gap_coach"
+    assert s.pending_recommender_offer == "local_gap_coach"
+
+
+def test_pending_recommender_offer_accepts_target_noc_standard() -> None:
+    s = StagedProfile.new("sess-1")
+    s.pending_recommender_offer = "target_noc_standard"
+    assert s.pending_recommender_offer == "target_noc_standard"
+
+
+def test_pending_recommender_offer_accepts_adjacent_noc_standard() -> None:
+    s = StagedProfile.new("sess-1")
+    s.pending_recommender_offer = "adjacent_noc_standard"
+    assert s.pending_recommender_offer == "adjacent_noc_standard"
+
+
+def test_pending_recommender_offer_resets_on_target_role_text_change() -> None:
+    """Target switch invalidates any pending recommender offer. Same
+    per-target lifecycle as pending_adjacent_search_offer."""
+    s = StagedProfile.new("sess-1")
+    s.target_role_text = "accounting clerk"
+    s.pending_recommender_offer = "local_gap_coach"
+    assert s.pending_recommender_offer == "local_gap_coach"
+    s.target_role_text = "administrative assistant"
+    assert s.pending_recommender_offer is None
+
+
+def test_pending_recommender_offer_does_NOT_reset_on_same_target() -> None:
+    """Setting target_role_text to the SAME value must not clear the
+    pending offer -- the __setattr__ reset only fires on actual
+    changes (mirrors the existing pending_adjacent_search_offer
+    semantics in the same code block)."""
+    s = StagedProfile.new("sess-1")
+    s.target_role_text = "accounting clerk"
+    s.pending_recommender_offer = "local_gap_coach"
+    s.target_role_text = "accounting clerk"  # same value
+    assert s.pending_recommender_offer == "local_gap_coach"
+
+
+def test_cookie_payload_omits_default_pending_recommender_offer() -> None:
+    """Lossless minification: default None drops the key from the cookie
+    payload, saving ~40 bytes against the 3800-byte signed-cookie
+    ceiling. from_json's defensive deserialize reconstructs the default
+    from the absent key."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    blob = s.to_json(redact_for_cookie=True)
+    data = _json.loads(blob)
+    assert "pending_recommender_offer" not in data
+    s2 = StagedProfile.from_json(blob)
+    assert s2.pending_recommender_offer is None
+
+
+def test_cookie_payload_preserves_pending_recommender_offer_when_set() -> None:
+    """Non-default mode strings survive the cookie round-trip
+    unchanged. The same lossless contract as the other minified
+    pending flags."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    s.pending_recommender_offer = "local_gap_coach"
+    blob = s.to_json(redact_for_cookie=True)
+    data = _json.loads(blob)
+    assert data.get("pending_recommender_offer") == "local_gap_coach"
+    s2 = StagedProfile.from_json(blob)
+    assert s2.pending_recommender_offer == "local_gap_coach"
+
+
+def test_sanitize_pending_recommender_offer_drops_unknown_string() -> None:
+    """An arbitrary string that isn't a canonical RecommenderMode is
+    sanitized to None. A forged cookie cannot route to a nonexistent
+    recommender flow."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data["pending_recommender_offer"] = "made_up_mode"
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.pending_recommender_offer is None
+
+
+def test_sanitize_pending_recommender_offer_drops_non_string() -> None:
+    """Non-str values from a malformed cookie collapse to None."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    for bad in (1, True, [], {"mode": "local_gap_coach"}, 0.5):
+        data["pending_recommender_offer"] = bad
+        s2 = StagedProfile.from_json(_json.dumps(data))
+        assert s2.pending_recommender_offer is None, (
+            f"forged value {bad!r} (type {type(bad).__name__}) was not "
+            f"sanitized to None"
+        )
+
+
+def test_sanitize_pending_recommender_offer_drops_empty_string() -> None:
+    """Empty string is technically a str but not a valid mode; collapse
+    to None."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data["pending_recommender_offer"] = ""
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.pending_recommender_offer is None
+
+
+def test_cookie_round_trip_legacy_blob_without_recommender_offer_key() -> None:
+    """A pre-Step-2 cookie blob (no pending_recommender_offer key) must
+    load cleanly. Dataclass default applies; no key error reaches the
+    handler."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data.pop("pending_recommender_offer", None)
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.pending_recommender_offer is None

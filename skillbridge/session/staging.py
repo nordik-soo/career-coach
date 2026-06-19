@@ -119,6 +119,23 @@ MAX_SKILL_CHARS = 32
 # deserialization drops entries whose mode/action is not in these sets.
 _VALID_CREDENTIAL_MODES: frozenset[str] = frozenset({"hypothetical", "claimed"})
 _VALID_PENDING_ACTIONS: frozenset[str] = frozenset({"add", "remove"})
+
+# Slice 5 step 2 (2026-06-18): valid RecommenderMode strings for
+# pending_recommender_offer. Locally enumerated here so the session
+# module carries no import dependency on the chat recommender layer.
+# This deliberate independence is enforced by the chat-recommender
+# no-consumer guard test (which greps for cross-module references
+# until Step 5 wires the consumer).
+#
+# Keep this set in sync with the RecommenderMode Literal in the
+# chat recommender module. The three values are stable product
+# modes (one offer per conversational turn).
+_VALID_RECOMMENDER_MODES: frozenset[str] = frozenset({
+    "local_gap_coach",
+    "target_noc_standard",
+    "adjacent_noc_standard",
+})
+
 _VALID_WHY_ADJACENT: frozenset[str] = frozenset({
     "same_noc_minor_group", "skill_evidence",
 })
@@ -335,6 +352,38 @@ class StagedProfile:
     # target's offer. Same pattern as resume_upload_offered.
     pending_adjacent_search_offer: bool = False
 
+    # Slice 5 step 2 (2026-06-18): conversational recommender pending
+    # offer. When the system has emitted "want me to coach you on the
+    # skill gaps for these postings / national standard / adjacent
+    # roles?", the stored mode string tells the next-turn handler
+    # which recommender flow to resume on a yes-consent reply.
+    #
+    # Stored as the RecommenderMode string (NOT a bool) so the field
+    # carries both "is an offer pending?" and "which mode?" in one
+    # slot. Mirrors the RecommenderMode Literal defined in the chat
+    # recommender layer but does NOT import it -- the no-consumer
+    # guard test pins zero cross-module references outside the chat
+    # recommender module itself. The local _VALID_RECOMMENDER_MODES
+    # frozenset enumerates the same three strings.
+    #
+    # Lifecycle (Step 2 plumbing):
+    #   - Reset to None on target_role_text change via __setattr__.
+    #   - Counted in A2-α3's _count_entry_pending_flags so a bare yes
+    #     with this flag + another pending flag triggers the
+    #     ambiguity guard.
+    #   - Lossless minification in to_json(redact_for_cookie=True) so
+    #     a default None value never eats cookie budget.
+    #   - Defensive deserialization: invalid mode strings or non-str
+    #     values are sanitized to None at from_json time.
+    #
+    # NOT included in Step 2:
+    #   - SET point (which turn emits the offer) -- belongs in Step 4
+    #     with the conversational flow design, to avoid conflict with
+    #     the existing pending_adjacent_search_offer set point.
+    #   - Consume / route logic on yes-consent -- belongs in Step 4
+    #     alongside the recommender response.
+    pending_recommender_offer: str | None = None
+
     # ----------------------------------------------- attribute interception
     def __setattr__(self, name: str, value: Any) -> None:
         """Invalidate cached target_noc when target_role_text changes.
@@ -382,6 +431,11 @@ class StagedProfile:
                 # adjacencies. Same per-target lifecycle as
                 # resume_upload_offered.
                 self.__dict__["pending_adjacent_search_offer"] = False
+                # Slice 5 step 2 (2026-06-18): target switch
+                # invalidates any pending recommender offer too --
+                # the prior offer was about the prior target's gaps.
+                # Same per-target lifecycle as pending_adjacent_search_offer.
+                self.__dict__["pending_recommender_offer"] = None
         # Fresh-intake-on-target-change pillar (2026-06-15) — stamp
         # experience alignment on ANY non-empty experience_text
         # assignment. Catching this here (not just in merge_fields)
@@ -564,6 +618,14 @@ class StagedProfile:
                 data.pop("experience_collected_for_target", None)
             if data.get("resume_upload_offered") is False:
                 data.pop("resume_upload_offered", None)
+            # Slice 5 step 2 (2026-06-18): lossless minification for
+            # pending_recommender_offer. The default None value never
+            # carries meaning; dropping it saves ~40 bytes per cookie
+            # round-trip and keeps headroom against the 3800-byte
+            # signed-cookie ceiling. from_json's defensive deserialize
+            # reconstructs the default from absent keys.
+            if data.get("pending_recommender_offer") is None:
+                data.pop("pending_recommender_offer", None)
         return json.dumps(data, separators=(",", ":"))
 
     @classmethod
@@ -621,6 +683,15 @@ class StagedProfile:
         if "last_adjacent_snapshot" in data:
             data["last_adjacent_snapshot"] = _sanitize_adjacent_snapshot(
                 data["last_adjacent_snapshot"]
+            )
+        # Slice 5 step 2 (2026-06-18): pending_recommender_offer must
+        # be one of the canonical RecommenderMode strings or None. A
+        # forged cookie with an arbitrary string would otherwise route
+        # to a nonexistent recommender flow. Missing key -> default
+        # None via the dataclass.
+        if "pending_recommender_offer" in data:
+            data["pending_recommender_offer"] = _sanitize_pending_recommender_offer(
+                data["pending_recommender_offer"]
             )
         return cls(**data, skills=skills)
 
@@ -811,6 +882,23 @@ def _sanitize_pending_adjacent_offer(value: Any) -> bool:
     to False. A forged cookie cannot trick the handler into believing an
     offer was issued when it wasn't."""
     return value is True
+
+
+def _sanitize_pending_recommender_offer(value: Any) -> str | None:
+    """Defensive-deserialize the conversational recommender pending
+    offer mode. Returns the value verbatim only when it's one of the
+    canonical RecommenderMode strings (local_gap_coach /
+    target_noc_standard / adjacent_noc_standard); any other value
+    -- including non-str, unknown strings, empty string -- collapses
+    to None.
+
+    Slice 5 step 2 invariant: a forged cookie cannot inject an
+    arbitrary string that would route to a nonexistent recommender
+    flow. The handler trusts that any non-None value here is one of
+    the three known modes."""
+    if isinstance(value, str) and value in _VALID_RECOMMENDER_MODES:
+        return value
+    return None
 
 
 def _sanitize_adjacent_snapshot(value: Any) -> dict[str, Any] | None:
