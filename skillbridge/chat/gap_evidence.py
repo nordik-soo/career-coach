@@ -575,3 +575,91 @@ def compute_adjacent_noc_standard_gaps(
             status="ok",
         ))
     return tuple(out)
+
+
+# =========================================================================
+# Slice 5 step 1 (2026-06-18) -- RecommenderEvidence wrapper
+# =========================================================================
+# The conversational recommender activates EXACTLY ONE mode per turn
+# (per the locked one-offer-at-a-time design). The handler computes
+# the relevant detector output for that mode, caps it where rules
+# apply (Layer A/C top-3 by importance; Layer B via CP4 ranker),
+# attaches verified TrainingResources where available (local_gap_coach
+# only), and passes the wrapper to the responder via
+# ResponderV2Input.recommendation_evidence.
+#
+# The `mode` discriminator tells the responder which prompt section
+# to activate (LOCAL_POSTING_GAPS / TARGET_NOC_STANDARD_AREAS /
+# ADJACENT_NOC_STANDARD_AREAS) and which voice rules apply.
+#
+# This slice adds the dataclasses only. No production consumer; the
+# existing guard test pins zero-consumer status.
+
+RecommenderMode = Literal[
+    "local_gap_coach",          # Layer B + Layer B postings + TrainingResources
+    "target_noc_standard",      # Layer A; training empty by design
+    "adjacent_noc_standard",    # Layer C; training empty by design
+]
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingResource:
+    """One verified URL-bearing training option attached to a specific gap.
+
+    Constructed ONLY from registry Resource entries where
+    `Resource.surface_url(today)` is non-None. By that construction:
+      - referral_only resources NEVER produce a TrainingResource
+        (Resource.surface_url short-circuits at type=="referral_only")
+      - pending (verified_at=None) resources never appear
+      - stale (verified_at older than DEFAULT_FRESHNESS_DAYS=180)
+        resources never appear
+      - url is guaranteed https (registry load enforces it at
+        registry.py:384)
+
+    Referral-only guidance is a SEPARATE concern handled in the
+    recommender prompt copy ("we don't have a verified course;
+    consider asking the SCCC"), NOT a field on this record. Keeping
+    the data shape honest prevents the LLM from blending URL-bearing
+    options with referral suggestions.
+
+    Per-skill attachment: skill_id (preferred) or skill_name (fallback
+    when skill_id is None) ties this resource to a specific GapEvidence
+    record. The responder never has to guess which gap a training
+    option addresses.
+    """
+    skill_id: str | None
+    skill_name: str
+    provider: str
+    type: str       # one of credential_pathway | local_training |
+                    # apprenticeship | online_course
+                    # referral_only is excluded by construction
+    url: str        # from Resource.surface_url(today);
+                    # registry-verified, fresh, https
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecommenderEvidence:
+    """One mode's evidence payload for a single conversational turn.
+
+    The handler activates exactly one mode per turn and constructs
+    a single RecommenderEvidence with that mode's records. The
+    responder reads `mode` to pick the prompt section and voice
+    rules.
+
+    Field contracts:
+      - `evidence`: GapEvidence records for the active mode. Already
+        capped where rules apply (Layer A/C top-3 by importance is
+        applied at handler-side wrapper assembly time; Layer B is
+        CP4-ranked). Every record's `layer` field matches the
+        wrapper's `mode`.
+      - `training`: TrainingResource records bound to evidence
+        entries by skill_id/skill_name. Non-empty ONLY in
+        local_gap_coach mode; the recommender prompt for
+        target_noc_standard and adjacent_noc_standard does NOT name
+        providers (those modes describe occupation-level standards,
+        not specific training paths).
+    """
+    mode: RecommenderMode
+    evidence: tuple[GapEvidence, ...]
+    training: tuple[TrainingResource, ...]

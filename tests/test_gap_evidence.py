@@ -1183,6 +1183,184 @@ def test_layer_c_real_adjacent_job_shape_smoke(monkeypatch):
     assert result[0].status == "no_reference_skill_profile"
 
 
+# ===========================================================================
+# Slice 5 step 1 -- RecommenderEvidence + TrainingResource shape
+# ===========================================================================
+# Tests cover:
+#   - Per-mode RecommenderEvidence construction (local_gap_coach,
+#     target_noc_standard, adjacent_noc_standard)
+#   - TrainingResource construction (verified URL-bearing only)
+#   - Frozen / slots invariants for both dataclasses
+#   - Equality semantics
+#   - Empty training tuple is the default in non-local modes
+#   - No production consumer yet (the existing guard test still passes)
+
+
+def test_training_resource_construction():
+    """Build a TrainingResource with all required fields. Mirrors what
+    the handler would build from a registry.Resource after surface_url
+    validation."""
+    tr = ge_mod.TrainingResource(
+        skill_id="S_CLASSG",
+        skill_name="Class G driver's license",
+        provider="Ministry of Transportation Ontario",
+        type="credential_pathway",
+        url="https://www.ontario.ca/page/driving-licence",
+        summary="G-license road-test scheduling and preparation",
+    )
+    assert tr.skill_id == "S_CLASSG"
+    assert tr.skill_name == "Class G driver's license"
+    assert tr.provider == "Ministry of Transportation Ontario"
+    assert tr.type == "credential_pathway"
+    assert tr.url.startswith("https://")
+    assert tr.summary == "G-license road-test scheduling and preparation"
+
+
+def test_training_resource_skill_id_can_be_none():
+    """skill_id is nullable -- when the gap's skill_id wasn't resolved
+    (Layer B with extractor miss), attach by skill_name only."""
+    tr = ge_mod.TrainingResource(
+        skill_id=None,
+        skill_name="QuickBooks Desktop",
+        provider="Sault College",
+        type="local_training",
+        url="https://saultcollege.ca/quickbooks",
+        summary="Hands-on QuickBooks course, evenings",
+    )
+    assert tr.skill_id is None
+    assert tr.skill_name == "QuickBooks Desktop"
+
+
+def test_training_resource_is_frozen():
+    tr = ge_mod.TrainingResource(
+        skill_id="S1", skill_name="X", provider="P",
+        type="local_training", url="https://x.example/", summary="s",
+    )
+    with pytest.raises(Exception):  # FrozenInstanceError
+        tr.provider = "other"  # type: ignore[misc]
+
+
+def test_training_resource_uses_slots():
+    tr = ge_mod.TrainingResource(
+        skill_id="S1", skill_name="X", provider="P",
+        type="local_training", url="https://x.example/", summary="s",
+    )
+    with pytest.raises(AttributeError):
+        object.__setattr__(tr, "extra", "x")
+
+
+def test_recommender_evidence_local_gap_coach_construction():
+    """local_gap_coach mode carries Layer B evidence plus zero or more
+    TrainingResources. The handler builds this after computing
+    compute_local_posting_gaps + CP4 ranking + per-skill registry
+    lookup."""
+    gap = ge_mod.GapEvidence(
+        layer="local_posting",
+        source_id="job-abc-123",
+        source_label="Accounting Clerk @ Diamond J Farms",
+        skill_id="S_BANK",
+        skill_name="bank reconciliation",
+        blocker=False,
+        importance=None,
+        source="extracted.job_skill",
+    )
+    training = ge_mod.TrainingResource(
+        skill_id="S_BANK",
+        skill_name="bank reconciliation",
+        provider="Sault College",
+        type="local_training",
+        url="https://saultcollege.ca/bookkeeping",
+        summary="Bookkeeping fundamentals with bank reconciliation module",
+    )
+    rec = ge_mod.RecommenderEvidence(
+        mode="local_gap_coach",
+        evidence=(gap,),
+        training=(training,),
+    )
+    assert rec.mode == "local_gap_coach"
+    assert len(rec.evidence) == 1
+    assert rec.evidence[0].skill_id == "S_BANK"
+    assert len(rec.training) == 1
+    assert rec.training[0].provider == "Sault College"
+
+
+def test_recommender_evidence_target_noc_standard_construction():
+    """target_noc_standard mode carries Layer A evidence and EMPTY
+    training -- the recommender does not name training providers for
+    occupation-standard development areas (those modes describe
+    standards, not specific paths)."""
+    gap = ge_mod.GapEvidence(
+        layer="target_noc_standard",
+        source_id="14200",
+        source_label="Accounting and related clerks",
+        skill_id="S_INFO_ORDER",
+        skill_name="Information Ordering",
+        blocker=False,
+        importance=4.5,
+        source="reference.noc_skill",
+    )
+    rec = ge_mod.RecommenderEvidence(
+        mode="target_noc_standard",
+        evidence=(gap,),
+        training=(),
+    )
+    assert rec.mode == "target_noc_standard"
+    assert rec.evidence[0].layer == "target_noc_standard"
+    assert rec.training == ()
+
+
+def test_recommender_evidence_adjacent_noc_standard_construction():
+    """adjacent_noc_standard mode carries Layer C-derived evidence
+    (flat across all surfaced adjacent NOCs) and EMPTY training."""
+    gap = ge_mod.GapEvidence(
+        layer="adjacent_noc_standard",
+        source_id="13110",
+        source_label="Administrative assistants",
+        skill_id="S_ACTIVE_LISTEN",
+        skill_name="Active Listening",
+        blocker=False,
+        importance=3.8,
+        source="reference.noc_skill",
+    )
+    rec = ge_mod.RecommenderEvidence(
+        mode="adjacent_noc_standard",
+        evidence=(gap,),
+        training=(),
+    )
+    assert rec.mode == "adjacent_noc_standard"
+    assert rec.evidence[0].layer == "adjacent_noc_standard"
+    assert rec.training == ()
+
+
+def test_recommender_evidence_is_frozen():
+    rec = ge_mod.RecommenderEvidence(
+        mode="local_gap_coach", evidence=(), training=(),
+    )
+    with pytest.raises(Exception):
+        rec.mode = "target_noc_standard"  # type: ignore[misc]
+
+
+def test_recommender_evidence_uses_slots():
+    rec = ge_mod.RecommenderEvidence(
+        mode="local_gap_coach", evidence=(), training=(),
+    )
+    with pytest.raises(AttributeError):
+        object.__setattr__(rec, "extra", "x")
+
+
+def test_recommender_evidence_equality_by_value():
+    """Frozen dataclass gives us value-based __eq__ for free; the
+    test pins it for downstream code that may dedup or compare
+    evidence packages."""
+    rec_a = ge_mod.RecommenderEvidence(
+        mode="local_gap_coach", evidence=(), training=(),
+    )
+    rec_b = ge_mod.RecommenderEvidence(
+        mode="local_gap_coach", evidence=(), training=(),
+    )
+    assert rec_a == rec_b
+
+
 # ---------------------------------------------------------------------------
 # No-consumer guard for Slice 1
 # ---------------------------------------------------------------------------
