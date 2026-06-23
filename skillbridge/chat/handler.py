@@ -28,7 +28,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # CareerIntent is a Literal type used only in annotations on the
+    # intent dispatcher; runtime import lives inside the routing helper
+    # to keep handler.py's import surface tight.
+    from skillbridge.chat.recommender_intent import CareerIntent
 
 from config import (
     CHAT_ORCHESTRATOR,
@@ -519,6 +525,566 @@ def _classify_pattern_2_reply(message: str) -> str:
     if intent == "declining":
         return "no"
     return "other"
+
+
+# Slice 5 step 4 (2026-06-19): conversational recommender chain
+# consume dispatch. See project_recommender_step4_implementation_lock
+# memory for the locked design.
+_VALID_RECOMMENDER_MODES: frozenset[str] = frozenset({
+    "local_gap_coach",
+    "target_noc_standard",
+    "adjacent_noc_standard",
+})
+
+# Locked next-mode mapping: each mode advances the chain. None means
+# the chain ENDS HERE (adjacent_noc_standard is terminal).
+_RECOMMENDER_NEXT_MODE: dict[str, str | None] = {
+    "local_gap_coach": "target_noc_standard",
+    "target_noc_standard": "adjacent_noc_standard",
+    "adjacent_noc_standard": None,
+}
+
+
+def _classify_recommender_consent(message: str) -> str:
+    """Classify the user's reply to a recommender chain offer. Wraps
+    the existing `_classify_pattern_2_reply` -- same yes/no/other
+    semantics, same battle-tested classifier authority, same coach
+    vocabulary set. Kept as a separate name so future divergence (if
+    the chain ever needs different semantics) is a one-place edit."""
+    return _classify_pattern_2_reply(message)
+
+
+def _dispatch_recommender_consume(
+    *,
+    staged: StagedProfile,
+    user_message: str,
+    store,
+    resume_info: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Dispatch one turn of the conversational recommender chain.
+
+    Returns a complete response dict when the chain handled the turn,
+    or None to fall through to normal flow (consent="other" or any
+    structural-precondition failure).
+
+    Locked design contract (see project_recommender_step4_implementation_lock):
+      - On consent="yes": re-run the engine if mode == local_gap_coach;
+        build the per-mode RecommenderEvidence via the corresponding
+        helper from recommender_assembly; dispatch the responder with
+        recommendation_evidence set; advance the chain to the next mode
+        (or None at adjacent_noc_standard).
+      - On consent="no": consume the flag + clear last_adjacent_nocs;
+        render a soft acknowledgment and return.
+      - On consent="other": leave the flag set and return None so the
+        message routes through normal flow. The chain-bound TTL on
+        target_role_text change clears the orphaned flag eventually.
+    """
+    if staged.pending_recommender_offer is None:
+        return None
+    mode = staged.pending_recommender_offer
+    if mode not in _VALID_RECOMMENDER_MODES:
+        # Defensive: a forged or stale flag value clears safely.
+        staged.pending_recommender_offer = None
+        return None
+
+    consent = _classify_recommender_consent(user_message)
+    log.info(
+        "anon_chat session=%s recommender_consent=%s mode=%s",
+        staged.session_id[:8], consent, mode,
+    )
+
+    if consent == "other":
+        return None  # fall through to normal flow
+
+    if consent == "no":
+        staged.pending_recommender_offer = None
+        staged.last_adjacent_nocs = ()
+        staged.touch()
+        new_session_id = store.save(staged)
+        return {
+            "reply": (
+                "Got it -- happy to help if you change your mind. "
+                "What else can I look into?"
+            ),
+            "profile_id": None,
+            "session_id": new_session_id,
+            "intake_state": staged.intake_state,
+            "asked_slots": [],
+            "next_action": intake_state.ACTION_ACKNOWLEDGE_AND_WAIT,
+            "recommended_jobs": [],
+            "next_skill_suggestion": None,
+            "resume_info": resume_info,
+            "requires_consent": True,
+        }
+
+    # consent == "yes" -> build evidence for the active mode + dispatch.
+    from datetime import date
+    from skillbridge.chat.gap_evidence import RecommenderEvidence
+    from skillbridge.chat.recommender_assembly import (
+        build_recommender_evidence_adjacent_noc_standard,
+        build_recommender_evidence_local_gap_coach,
+        build_recommender_evidence_target_noc_standard,
+    )
+    from skillbridge.chat.development_plan import compute_primary_gap_name
+    from skillbridge.match.engine import (
+        build_user_skill_rows,
+        compute_matches_in_memory,
+        derive_user_skill_sets,
+    )
+
+    user_rows = build_user_skill_rows(staged.skills)
+    user_skill_ids, _names, _canon = derive_user_skill_sets(user_rows)
+
+    rec_evidence: RecommenderEvidence | None = None
+    try:
+        if mode == "local_gap_coach":
+            in_memory_matches = compute_matches_in_memory(staged, top=5)
+            primary = compute_primary_gap_name(
+                staged=staged,
+                user_message=user_message,
+                truth_enough_to_match=True,
+                truth_usable_evidence_present=True,
+                engine_completed=True,
+                in_memory_matches=in_memory_matches,
+                skill_adjacent_results=None,
+                snapshot_usable=True,
+                target_posting_count=len(in_memory_matches),
+            )
+            registry = None
+            if TRAINING_REGISTRY_ENABLED:
+                try:
+                    from skillbridge.training.registry import get_registry
+                    registry = get_registry()
+                except Exception:  # noqa: BLE001
+                    log.warning(
+                        "recommender_consume registry_load_failed; "
+                        "training will be empty"
+                    )
+                    registry = None
+            rec_evidence = build_recommender_evidence_local_gap_coach(
+                match_results=in_memory_matches,
+                primary_gap_name=primary,
+                registry=registry,
+                today=date.today(),
+            )
+        elif mode == "target_noc_standard":
+            rec_evidence = build_recommender_evidence_target_noc_standard(
+                user_skill_ids=user_skill_ids,
+                target_noc=staged.target_noc,
+            )
+        elif mode == "adjacent_noc_standard":
+            rec_evidence = build_recommender_evidence_adjacent_noc_standard(
+                user_skill_ids=user_skill_ids,
+                last_adjacent_nocs=staged.last_adjacent_nocs,
+            )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "recommender_consume evidence_build_failed mode=%s", mode,
+        )
+        # Clear the flag so the chain doesn't loop on a failing mode.
+        staged.pending_recommender_offer = None
+        return None
+
+    if rec_evidence is None:
+        # Defensive: shouldn't happen given the mode guard above, but
+        # if some future mode is added without a branch, fall through.
+        return None
+
+    # Synthesize a passthrough ArbiterDecision. compose_response_v2's
+    # recommender early-return ignores `decision` so this value is
+    # never consulted downstream -- but the dataclass requires it.
+    synth = ArbiterDecision(
+        final_move="present_tiered_matches",
+        reason_code="recommender_consume:" + mode,
+        tone="neutral",
+        arbiter_action="recommender",
+        ask_slot=None,
+    )
+    inp = ResponderV2Input(
+        user_message=user_message,
+        decision=synth,
+        results=[],
+        training_by_job={},
+        next_skill=(None, 0),
+        band_signal="none",
+        requires_consent=True,
+        target_role_text=staged.target_role_text,
+        resume_facts=_effective_facts_view(staged),
+        recommendation_evidence=rec_evidence,
+    )
+    reply = compose_response_v2(inp)
+
+    # Advance the chain.
+    next_mode = _RECOMMENDER_NEXT_MODE[mode]
+    staged.pending_recommender_offer = next_mode
+    if next_mode is None:
+        # Chain ENDS here. Clear the per-target Layer C cache.
+        staged.last_adjacent_nocs = ()
+    staged.touch()
+    new_session_id = store.save(staged)
+    return {
+        "reply": reply,
+        "profile_id": None,
+        "session_id": new_session_id,
+        "intake_state": staged.intake_state,
+        "asked_slots": [],
+        "next_action": intake_state.ACTION_PRESENT_MATCHES,
+        "recommended_jobs": [],
+        "next_skill_suggestion": None,
+        "resume_info": resume_info,
+        "requires_consent": True,
+    }
+
+
+# =========================================================================
+# Step 3 peer-engine wiring (2026-06-22) -- intent-driven recommender
+# dispatch + canned substrate/out-of-scope responses.
+# =========================================================================
+# Canned response placeholders. Wording deferred per step 3 lock --
+# these are plain, terse, and may be re-voiced in a later slice without
+# touching routing logic.
+
+_ASK_TARGET_CANNED: str = (
+    "Which kind of work are you thinking about? Name a role or field "
+    "and I'll look at the gap from there."
+)
+
+_ASK_SKILLS_CANNED: str = (
+    "Tell me a bit about what you've done -- any work history, "
+    "training, or skills -- or upload your resume. I need that to "
+    "say anything useful."
+)
+
+_ASK_BOTH_CANNED: str = (
+    "Tell me what kind of work you're looking at and a bit about your "
+    "background -- or upload your resume. I'll go from there."
+)
+
+_OUT_OF_SCOPE_CANNED: str = (
+    "I help with finding local Sault Ste. Marie jobs and figuring out "
+    "what skills to build for them. Resume tailoring, cover letters, "
+    "and interview prep are a better fit for the Sault Community "
+    "Career Centre. Want me to look at job matches or skill gaps for "
+    "a target role?"
+)
+
+
+def _dispatch_recommender_from_intent(
+    *,
+    staged: StagedProfile,
+    mode: str,
+    voice_hint: "CareerIntent | None",
+    user_message: str,
+    store,
+    resume_info: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Force-dispatch one recommender layer from a router verdict.
+
+    Unlike `_dispatch_recommender_consume`, this entry point:
+      - Does NOT classify consent (the router already decided this turn
+        belongs to the recommender via career intent + substrate gate).
+      - Takes the lead mode as input from the router; never re-decides.
+      - Uses the SAME _RECOMMENDER_NEXT_MODE chain mapping the existing
+        consume helper uses, so the prompt's closing offer and the
+        next-turn pending state stay in sync (locked under Option A).
+
+    Returns the response dict, or None if anything in the dispatch
+    chain failed (caller falls through to normal flow).
+    """
+    if mode not in _VALID_RECOMMENDER_MODES:
+        log.warning(
+            "recommender_intent_dispatch invalid mode=%r; falling through",
+            mode,
+        )
+        return None
+
+    from datetime import date
+    from skillbridge.chat.gap_evidence import RecommenderEvidence
+    from skillbridge.chat.recommender_assembly import (
+        build_recommender_evidence_adjacent_noc_standard,
+        build_recommender_evidence_local_gap_coach,
+        build_recommender_evidence_target_noc_standard,
+    )
+    from skillbridge.chat.development_plan import compute_primary_gap_name
+    from skillbridge.match.engine import (
+        build_user_skill_rows,
+        compute_matches_in_memory,
+        derive_user_skill_sets,
+    )
+
+    user_rows = build_user_skill_rows(staged.skills)
+    user_skill_ids, _names, _canon = derive_user_skill_sets(user_rows)
+
+    rec_evidence: RecommenderEvidence | None = None
+    try:
+        if mode == "local_gap_coach":
+            in_memory_matches = compute_matches_in_memory(staged, top=5)
+            primary = compute_primary_gap_name(
+                staged=staged,
+                user_message=user_message,
+                truth_enough_to_match=True,
+                truth_usable_evidence_present=True,
+                engine_completed=True,
+                in_memory_matches=in_memory_matches,
+                skill_adjacent_results=None,
+                snapshot_usable=True,
+                target_posting_count=len(in_memory_matches),
+            )
+            registry = None
+            if TRAINING_REGISTRY_ENABLED:
+                try:
+                    from skillbridge.training.registry import get_registry
+                    registry = get_registry()
+                except Exception:  # noqa: BLE001
+                    log.warning(
+                        "recommender_intent_dispatch registry_load_failed; "
+                        "training will be empty"
+                    )
+                    registry = None
+            rec_evidence = build_recommender_evidence_local_gap_coach(
+                match_results=in_memory_matches,
+                primary_gap_name=primary,
+                registry=registry,
+                today=date.today(),
+            )
+        elif mode == "target_noc_standard":
+            rec_evidence = build_recommender_evidence_target_noc_standard(
+                user_skill_ids=user_skill_ids,
+                target_noc=staged.target_noc,
+            )
+        elif mode == "adjacent_noc_standard":
+            # Known limitation in this slice: Layer C requires
+            # `last_adjacent_nocs` to be populated by a prior matching
+            # turn (the SET site that captured sideways_move adjacent
+            # NOCs). For intent-driven cold entry without that prior
+            # turn, the wrapper returns empty and the fallback renders
+            # honestly. Wiring full internal matching invocation
+            # (engine + adjacency pipeline) into this dispatcher is a
+            # follow-up slice per memo section 4.
+            rec_evidence = build_recommender_evidence_adjacent_noc_standard(
+                user_skill_ids=user_skill_ids,
+                last_adjacent_nocs=staged.last_adjacent_nocs,
+            )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "recommender_intent_dispatch evidence_build_failed mode=%s",
+            mode,
+        )
+        return None
+
+    if rec_evidence is None:
+        return None
+
+    # Synthesize a passthrough ArbiterDecision; compose_response_v2's
+    # recommender early-return ignores `decision` so this value is
+    # never consulted downstream. Required by the dataclass shape.
+    synth = ArbiterDecision(
+        final_move="present_tiered_matches",
+        reason_code="recommender_intent_dispatch:" + mode,
+        tone="neutral",
+        arbiter_action="recommender",
+        ask_slot=None,
+    )
+    inp = ResponderV2Input(
+        user_message=user_message,
+        decision=synth,
+        results=[],
+        training_by_job={},
+        next_skill=(None, 0),
+        band_signal="none",
+        requires_consent=True,
+        target_role_text=staged.target_role_text,
+        resume_facts=_effective_facts_view(staged),
+        recommendation_evidence=rec_evidence,
+        recommender_voice_hint=voice_hint,
+    )
+    reply = compose_response_v2(inp)
+
+    # Option A (locked): set the next chain mode so the prompt's
+    # closing offer is not dead. Uses the existing chain dict; this
+    # slice does NOT change it.
+    next_mode = _RECOMMENDER_NEXT_MODE.get(mode)
+    staged.pending_recommender_offer = next_mode
+    if next_mode is None:
+        staged.last_adjacent_nocs = ()
+    staged.touch()
+    new_session_id = store.save(staged)
+    return {
+        "reply": reply,
+        "profile_id": None,
+        "session_id": new_session_id,
+        "intake_state": staged.intake_state,
+        "asked_slots": [],
+        "next_action": intake_state.ACTION_PRESENT_MATCHES,
+        "recommended_jobs": [],
+        "next_skill_suggestion": None,
+        "resume_info": resume_info,
+        "requires_consent": True,
+    }
+
+
+def _maybe_route_recommender_from_intent(
+    *,
+    staged: StagedProfile,
+    message: str,
+    store,
+) -> dict[str, Any] | None:
+    """Apply step 3 peer-engine routing.
+
+    Calls the LLM career-intent classifier and the deterministic
+    router, then acts on the verdict:
+      - matching_engine / default -> returns None (caller falls
+        through to existing matching flow)
+      - out_of_scope_canned       -> canned redirect
+      - ask_substrate             -> ask for missing target/skills
+      - recommender_layer         -> dispatch the forced mode via
+                                     _dispatch_recommender_from_intent
+
+    Defensive: any exception falls through to None so the existing
+    matching flow handles the turn. Routing must never break the
+    chat surface.
+    """
+    try:
+        from skillbridge.chat.recommender_intent import classify_career_intent
+        from skillbridge.chat.recommender_route import route_recommender
+        from skillbridge.chat.truth_summary import _classify_intent
+    except Exception:  # noqa: BLE001
+        log.exception("recommender_routing import_failed; falling through")
+        return None
+
+    try:
+        pattern_intent = _classify_intent(message)
+        career_intent = classify_career_intent(
+            message=message,
+            pending_recommender_offer=staged.pending_recommender_offer,
+            target_role_text=staged.target_role_text,
+            last_assistant_move=None,  # threading deferred; cache key tolerates None
+        )
+        chat_skill_count = len(staged.skills or [])
+        has_resume = _resume_facts_have_content(staged.resume_facts_json)
+
+        # Resolve target_role_text -> target_noc before substrate check.
+        # target_noc is normally populated by the matching engine via
+        # `resolve_title_to_noc` -- but the matching engine hasn't run
+        # yet on this turn (the router decides whether it will). If the
+        # extractor filled `target_role_text` from the current message
+        # but `target_noc` is still None, resolve it here so the
+        # substrate gate doesn't ask the user for a target they just
+        # named.
+        target_noc = staged.target_noc
+        if not target_noc and staged.target_role_text:
+            try:
+                from skillbridge.match.occupation import resolve_title_to_noc
+                resolved = resolve_title_to_noc(staged.target_role_text)
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "recommender_routing resolve_title_to_noc_failed; "
+                    "target stays None for this turn",
+                )
+                resolved = None
+            if (
+                isinstance(resolved, str)
+                and len(resolved) == 5
+                and resolved.isdigit()
+            ):
+                # Persist for downstream so the matching engine doesn't
+                # repeat the lookup -- mirrors the matching engine's
+                # own caching of resolution.
+                staged.target_noc = resolved
+                target_noc = resolved
+
+        verdict = route_recommender(
+            pattern_intent=pattern_intent,
+            career_intent=career_intent,
+            target_noc=target_noc,
+            chat_skill_count=chat_skill_count,
+            has_resume=has_resume,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "recommender_routing classify_or_route_failed; falling through",
+        )
+        return None
+
+    log.info(
+        "recommender_routing session=%s pattern=%s career=%s action=%s "
+        "reason=%s",
+        staged.session_id[:8], pattern_intent, career_intent,
+        verdict.action, verdict.reason,
+    )
+
+    if verdict.action in ("matching_engine", "default"):
+        return None  # let existing flow handle
+
+    if verdict.action == "out_of_scope_canned":
+        return _emit_canned_response(
+            staged=staged, store=store,
+            reply=_OUT_OF_SCOPE_CANNED, resume_info=None,
+        )
+
+    if verdict.action == "ask_substrate":
+        missing = set(verdict.missing)
+        if missing == {"target"}:
+            reply = _ASK_TARGET_CANNED
+        elif missing == {"skills"}:
+            reply = _ASK_SKILLS_CANNED
+        else:
+            reply = _ASK_BOTH_CANNED
+        return _emit_canned_response(
+            staged=staged, store=store,
+            reply=reply, resume_info=None,
+        )
+
+    if verdict.action == "recommender_layer":
+        if verdict.recommender_mode is None:
+            log.warning(
+                "recommender_routing recommender_layer verdict missing "
+                "recommender_mode; falling through",
+            )
+            return None
+        return _dispatch_recommender_from_intent(
+            staged=staged,
+            mode=verdict.recommender_mode,
+            voice_hint=verdict.voice_hint,
+            user_message=message,
+            store=store,
+            resume_info=None,
+        )
+
+    # Defensive: unknown action. Fall through.
+    log.warning(
+        "recommender_routing unknown verdict action=%r; falling through",
+        verdict.action,
+    )
+    return None
+
+
+def _emit_canned_response(
+    *,
+    staged: StagedProfile,
+    store,
+    reply: str,
+    resume_info: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Shared shape for canned-text responses (ask_substrate +
+    out_of_scope_canned). Does NOT mutate intake_state or pending
+    flags -- routing chose to bypass the engines this turn, but the
+    user's session continues from its current state on the next turn.
+    """
+    staged.touch()
+    new_session_id = store.save(staged)
+    return {
+        "reply": reply,
+        "profile_id": None,
+        "session_id": new_session_id,
+        "intake_state": staged.intake_state,
+        "asked_slots": [],
+        "next_action": intake_state.ACTION_ASK_QUESTIONS,
+        "recommended_jobs": [],
+        "next_skill_suggestion": None,
+        "resume_info": resume_info,
+        "requires_consent": True,
+    }
 
 
 def _should_offer_resume_upload(
@@ -2476,14 +3042,17 @@ def _try_v2_path(
         staged.resume_upload_offered = True
 
     # Pattern 2 set hook (closing-matrix v2, Step 7b, 2026-06-17):
-    # when the responder is about to render a tier surface with
-    # resume on file AND at least one direct-target tier has
-    # records, the prompt's PATTERN 2 rule asks the user "want me
-    # to also look at related roles?" — set the pending flag so
-    # the NEXT turn's consume hook reads the user's yes/no/other
-    # reply. Pattern 2 doesn't fire when there's no resume (that's
-    # Pattern 1's universal upload-ask path) or when only adjacency
-    # has records (that's Pattern 3's auto-fire path).
+    # when the responder is about to render a tier surface with at
+    # least one direct-target tier record AND the user has a resume
+    # on file, the COACH_TIERS prompt emits the Pattern 2 closing
+    # ("want me to also look at related roles?"). Flip the staged
+    # flag here so the next turn's consume hook routes the user's
+    # yes/no reply correctly.
+    #
+    # Slice 5 step 4 separation (2026-06-19): the recommender chain
+    # used to also fire here, but it is now a fully-separate engine
+    # with its own trigger. This SET only handles the matching
+    # engine's Pattern 2 adjacency-consent offer.
     if (
         final.final_move == "present_tiered_matches"
         and staged.resume_facts_json
@@ -3792,6 +4361,67 @@ def _is_target_role_anaphor(message: str) -> bool:
     return any(p.match(stripped) for p in _ANAPHORIC_TARGET_PATTERNS)
 
 
+# Post-live-test fix (2026-06-22): hygiene check for the
+# target_role_text fallback-fill path. When the user replies to
+# "what kind of work?" with a different question rather than a role
+# answer, the fallback-fill binding poisons downstream state. This
+# helper detects question-shaped messages so fallback_fill can skip.
+_TARGET_QUESTION_STARTERS: tuple[str, ...] = (
+    "what ", "what's ", "whats ",
+    "how ", "how's ", "hows ",
+    "why ", "why's ", "whys ",
+    "where ", "where's ", "wheres ",
+    "when ", "when's ", "whens ",
+    "who ", "who's ", "whos ",
+    "which ",
+    "can ", "can't ", "cant ",
+    "could ", "couldn't ", "couldnt ",
+    "would ", "wouldn't ", "wouldnt ",
+    "should ", "shouldn't ", "shouldnt ",
+    "do ", "does ", "did ",
+    "is ", "are ", "am ",
+    "compare ",
+    "tell me ", "show me ",
+    "help me ",
+    "suggest ",
+)
+
+
+def _is_target_role_question_shaped(message: str) -> bool:
+    """True when the message looks like a question or recommender intent
+    rather than a plausible target-role-name answer.
+
+    Target role names are noun phrases ("accounting clerk", "nurse",
+    "welder"). They don't end with "?" and they don't start with
+    question words / conversational openers.
+
+    Three signals (any one suffices):
+      1. Message ends with "?"
+      2. Message starts with a question word / conversational opener
+         from _TARGET_QUESTION_STARTERS
+      3. truth_summary._classify_intent returns asking_about_gap or
+         asking_question (existing pattern classifier catches shapes
+         the heuristics miss)
+    """
+    if not isinstance(message, str):
+        return False
+    stripped = message.strip()
+    if not stripped:
+        return False
+    if stripped.endswith("?"):
+        return True
+    low = stripped.lower()
+    for starter in _TARGET_QUESTION_STARTERS:
+        if low.startswith(starter):
+            return True
+    try:
+        from skillbridge.chat.truth_summary import _classify_intent
+        intent = _classify_intent(stripped)
+    except Exception:  # noqa: BLE001
+        return False
+    return intent in ("asking_about_gap", "asking_question")
+
+
 def _resolve_target_role_anaphor(
     message: str, staged: StagedProfile,
 ) -> str | None:
@@ -4234,6 +4864,23 @@ def handle_anonymous(
             staged.session_id[:8], pattern_2_consent,
         )
 
+    # Slice 5 step 4 (2026-06-19): conversational recommender consume
+    # hook. Mirrors the Pattern 2 consume hook structure but routes to
+    # the recommender dispatcher when `pending_recommender_offer` is set
+    # AND the user's reply classifies as yes/no (on yes, the dispatcher
+    # owns the turn end-to-end and returns a complete response dict).
+    # See _dispatch_recommender_consume + project_recommender_step4_
+    # implementation_lock memory.
+    if not uploaded_file and staged.pending_recommender_offer is not None:
+        recommender_reply = _dispatch_recommender_consume(
+            staged=staged,
+            user_message=message or "",
+            store=store,
+            resume_info=None,
+        )
+        if recommender_reply is not None:
+            return recommender_reply
+
     # 0) If the user uploaded a resume, run the resume pipeline before
     # the regular chat extractor. The extracted facts feed staged.* slots,
     # so the rest of the handler "just sees" a richer profile.
@@ -4654,6 +5301,24 @@ def handle_anonymous(
                     "(no resume work_history)",
                     staged.session_id[:8], msg_stripped,
                 )
+        elif (
+            slot == "target_role_text"
+            and _is_target_role_question_shaped(msg_stripped)
+        ):
+            # Post-live-test fix (2026-06-22): the user's reply is
+            # question-shaped (e.g. "what should I improve?", "what
+            # training should I take?"). It is NOT a target role
+            # answer; binding it to target_role_text poisons downstream
+            # state (the matcher tries to resolve a question as a NOC
+            # title and the recommender classifier reads a nonsense
+            # role context). Skip the fallback fill -- the planner will
+            # re-ask, OR the recommender router downstream will
+            # classify the intent and route appropriately.
+            log.info(
+                "anon_chat session=%s fallback_fill_skipped=target_role_text "
+                "reason=question_shaped",
+                staged.session_id[:8],
+            )
         else:
             setattr(staged, slot, msg_stripped[:500])
             log.info(
@@ -4682,6 +5347,30 @@ def handle_anonymous(
     # observe message_count == 0 on a user's very first message. If v2 falls
     # back, the v1 touch() below runs normally.
     # =========================================================================
+    # Step 3 peer-engine routing (2026-06-22, relocated post-live-test
+    # 2026-06-22). Runs AFTER all input-processing steps that can
+    # legitimately update staged state in response to this turn's
+    # message:
+    #   - resume upload + resume-review (0 / 0b / 0c)
+    #   - chat extraction + slot merge (1+)
+    #   - canned-gates / training-topic consume / pattern-2 consume hooks
+    # The router must see the post-extraction view of staged so that a
+    # user's reply naming a target ("accounting clerk") or providing
+    # skills is observed by the router BEFORE the substrate gate runs.
+    # Original (broken) placement was pre-extraction and produced a
+    # substrate-ask loop visible in live verify on 2026-06-22.
+    #
+    # Skipped on resume uploads and blank messages -- the existing
+    # matching engine intake handles those naturally.
+    if not uploaded_file and message and message.strip():
+        intent_reply = _maybe_route_recommender_from_intent(
+            staged=staged,
+            message=message,
+            store=store,
+        )
+        if intent_reply is not None:
+            return intent_reply
+
     if CHAT_ORCHESTRATOR == "v2":
         v2_response = _try_v2_path(
             staged=staged,

@@ -67,11 +67,47 @@ Allowed slot_names (omit any slot you cannot fill from the message):
 - salary_expectation_text     (e.g., "around $20/hr", "open")
 - language_preferences        (list of language names they speak at work)
 
+TARGET ROLE EXTRACTION -- read carefully (overrides the general
+"asking a question" exclusion below specifically for target_role_text):
+
+Users name their target work area in several shapes. ALL of these
+should extract target_role_text = X, where X is the work-area phrase
+they named:
+
+  - Self-description: "I want to be a welder" -> target_role_text="welder"
+  - Self-description: "I'm looking for accounting work" -> target_role_text="accounting"
+  - Command / request: "show me accounting clerk jobs" -> target_role_text="accounting clerk"
+  - Command / request: "find me admin work" -> target_role_text="admin"
+  - Command / request: "any nursing roles" -> target_role_text="nursing"
+  - Command / request: "looking for retail openings" -> target_role_text="retail"
+  - Command / request: "interested in trades" -> target_role_text="trades"
+  - Question naming target: "are there welding jobs in Sault?" -> target_role_text="welding"
+  - Question naming target: "what construction roles are open?" -> target_role_text="construction"
+
+The "asking a question" exclusion below DOES NOT apply when the
+question or command names a target work area. Extract target_role_text
+in those cases as if it were a self-description.
+
+Do NOT extract target_role_text when the message names no specific
+work area:
+  - "show me jobs" -> omit (no role named)
+  - "show me a job" -> omit (no role named)
+  - "any good jobs" -> omit (no role named)
+  - "what's hiring" -> omit (no role named)
+
+Do NOT extract target_role_text from learning / training / improvement
+questions (the user is asking about a gap, not declaring a target):
+  - "what should I improve?" -> omit
+  - "what training should I take?" -> omit
+  - "where can I learn welding?" -> omit (training inquiry, not target naming)
+  - "compare me to the standard" -> omit
+  - "what gaps do I have?" -> omit
+
 EVIDENCE RULES — read carefully:
 - For every field and every skill, the "evidence" MUST be a substring that appears verbatim in the user's message (case-insensitive). At least 4 characters long.
 - If you cannot find verbatim evidence, OMIT the slot. Do not paraphrase. Do not summarise. Do not infer.
 - Do not invent skills, locations, or numbers the user did not say.
-- If the user is asking a question rather than describing themselves, return {"fields":{},"skills":[]}.
+- If the user is asking a question rather than describing themselves, return {"fields":{},"skills":[]} -- EXCEPT when the rule above (TARGET ROLE EXTRACTION) applies, in which case extract target_role_text per that rule.
 - If the user expresses a decline ("rather not say", "skip that", "prefer not to say"), OMIT that slot and let the backend handle the decline.
 - skills should be short concrete noun phrases (e.g., "forklift operation", "customer service", "Microsoft Excel"). Not personality traits ("hard worker") and not aspirations ("want to learn nursing").
 - DRIVER'S LICENCES AND TRADE CREDENTIALS the user states they HAVE belong in skills[], not transportation_text. Examples: "Class G license", "Class A license", "AZ license", "DZ license", "310T", "310S", "PSW certificate", "WHMIS", "first aid", "food handler", "forklift certification". transportation_text is reserved for accessibility info ("own car", "bus only", "no licence at all") — never for the licence-as-skill claim itself.
@@ -1159,39 +1195,28 @@ user can click through. If it's null, omit it.
 #
 # What Pattern 2 does: the user has a resume on file AND the engine
 # surfaced at least one direct-target match. The closing OFFERS the
-# related-role search (CP5) — does NOT push them toward applying
-# and does NOT auto-fire CP5 (that's Pattern 3's path). This is a
-# two-turn flow: ask now, fire on user's yes next turn.
+# user a related-role search (CP5 two-turn flow) — the matching
+# engine's adjacency-consent gate. On the next turn's "yes" the
+# system runs the related-role search (CP5) and surfaces sideways
+# matches. This is the matching engine's own broadening offer; it
+# is not the recommender chain.
 #
 # Structural rules for Pattern 2:
 #   1. The response narrates the surfaced direct-target tiers
 #      under their correct headings (Strong / Good / Stretch /
 #      Explore later — per the heading rules above).
-#   2. The closing question OFFERS to broaden to related roles —
-#      see the locked example phrasings below. NEVER the action
-#      closing (see FORBIDDEN CLOSING PHRASES above).
-#   3. The closing MUST be ONE sentence ending with "?". Single
-#      direct offer — no "if you'd like..." preambles, no compound
-#      questions, under 25 words.
-#   4. Use "related" in user-facing copy (NOT "adjacent" — that's
-#      internal vocab).
+#   2. The closing question OFFERS related-role search as one sentence,
+#      ending with "?", under 25 words. Coach voice.
+#   3. NEVER the action closing (see FORBIDDEN CLOSING PHRASES above).
+#   4. Use "related roles" in user-facing copy (NOT "adjacent" —
+#      that is internal vocab).
 #   5. The closing MUST NOT mention applying, credentials, cover
-#      letters, deadlines, or making a move on the job. See the
-#      FORBIDDEN CLOSING PHRASES list above. Tier-card body prose
-#      CAN mention these (e.g. "they ask for confidentiality
-#      handling — touch on that in your cover letter") — what's
-#      forbidden is making THE CLOSING QUESTION about applying.
+#      letters, deadlines, or making a move on the job.
 #
-# Vary the phrasing turn-by-turn (never repeat the exact same
-# sentence twice in one session). Every example below is ONE direct
-# sentence ending with "?":
-#   - "Want me to also look at related roles your skills fit?"
-#   - "Should I check related roles that line up with your
-#     skillset?"
-#   - "Want me to look at other roles your background opens up?"
-# Tone: confident, forward-moving. The user has shown commitment
-# (uploaded resume); the system reciprocates by offering depth of
-# service, not a quick exit toward "apply".
+# Canonical example phrasing (the LLM may vary the wording within
+# the rules above, but this is the anchor — two-turn flow waits
+# for the user's yes before firing CP5):
+#   "Want me to also look at related roles your skills fit?"
 
 # -------------------------------------------------------------------------
 # PATTERN 3 (closing-matrix v2, LOCKED 2026-06-17)

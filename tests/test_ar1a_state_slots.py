@@ -875,3 +875,153 @@ def test_cookie_round_trip_legacy_blob_without_recommender_offer_key() -> None:
     data.pop("pending_recommender_offer", None)
     s2 = StagedProfile.from_json(_json.dumps(data))
     assert s2.pending_recommender_offer is None
+
+
+# ===========================================================================
+# Slice 5 step 4 (2026-06-19) -- last_adjacent_nocs plumbing
+# ===========================================================================
+# State field for adjacent NOC codes captured at present_tiered_matches
+# turn. Layer C uses this to compute the adjacent_noc_standard
+# recommender mode (locked design, third in the chain).
+#
+# Tests verify:
+#   - default is empty tuple
+#   - accepts tuples of exact-5-digit NOC codes
+#   - resets to empty tuple on target_role_text change
+#   - lossless cookie minification when empty (key dropped)
+#   - non-empty values survive round-trip
+#   - sanitizer rejects non-string entries, non-5-digit codes,
+#     non-digit characters, duplicates, and entries past the cap
+def test_last_adjacent_nocs_default_is_empty_tuple() -> None:
+    s = StagedProfile.new("sess-1")
+    assert s.last_adjacent_nocs == ()
+
+
+def test_last_adjacent_nocs_accepts_valid_codes() -> None:
+    s = StagedProfile.new("sess-1")
+    s.last_adjacent_nocs = ("14200", "13110")
+    assert s.last_adjacent_nocs == ("14200", "13110")
+
+
+def test_last_adjacent_nocs_resets_on_target_role_text_change() -> None:
+    """Target switch invalidates the captured adjacent NOCs -- the
+    new target will surface a new sideways_move with potentially
+    different adjacent NOCs."""
+    s = StagedProfile.new("sess-1")
+    s.target_role_text = "accounting clerk"
+    s.last_adjacent_nocs = ("14200", "13110")
+    assert s.last_adjacent_nocs == ("14200", "13110")
+    s.target_role_text = "administrative assistant"
+    assert s.last_adjacent_nocs == ()
+
+
+def test_last_adjacent_nocs_does_NOT_reset_on_same_target() -> None:
+    """Same-value target reassignment must not clear the field."""
+    s = StagedProfile.new("sess-1")
+    s.target_role_text = "accounting clerk"
+    s.last_adjacent_nocs = ("14200",)
+    s.target_role_text = "accounting clerk"
+    assert s.last_adjacent_nocs == ("14200",)
+
+
+def test_cookie_payload_omits_default_last_adjacent_nocs() -> None:
+    """Lossless minification: empty tuple drops the key from the
+    cookie payload."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    blob = s.to_json(redact_for_cookie=True)
+    data = _json.loads(blob)
+    assert "last_adjacent_nocs" not in data
+    s2 = StagedProfile.from_json(blob)
+    assert s2.last_adjacent_nocs == ()
+
+
+def test_cookie_payload_preserves_last_adjacent_nocs_when_set() -> None:
+    """Non-default values survive the cookie round-trip. JSON
+    serializes tuple as list; from_json's sanitizer reconstructs the
+    tuple."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    s.last_adjacent_nocs = ("14200", "13110", "13100")
+    blob = s.to_json(redact_for_cookie=True)
+    data = _json.loads(blob)
+    assert data.get("last_adjacent_nocs") == ["14200", "13110", "13100"]
+    s2 = StagedProfile.from_json(blob)
+    assert s2.last_adjacent_nocs == ("14200", "13110", "13100")
+
+
+def test_sanitize_last_adjacent_nocs_drops_non_string_entries() -> None:
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data["last_adjacent_nocs"] = ["14200", 42, None, "13110", True]
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.last_adjacent_nocs == ("14200", "13110")
+
+
+def test_sanitize_last_adjacent_nocs_drops_wrong_length_codes() -> None:
+    """Locked design: exact 5-digit NOC only. Shorter (4-digit
+    family) and longer codes are dropped."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data["last_adjacent_nocs"] = ["1420", "14200", "142000", "13110"]
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.last_adjacent_nocs == ("14200", "13110")
+
+
+def test_sanitize_last_adjacent_nocs_drops_non_digit_characters() -> None:
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data["last_adjacent_nocs"] = ["14200", "abc14", "142A0", "13110"]
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.last_adjacent_nocs == ("14200", "13110")
+
+
+def test_sanitize_last_adjacent_nocs_caps_at_three() -> None:
+    """CP5 caps surfaced sideways_move at MAX_ADJACENT_ITEMS=3 by
+    construction, but the sanitizer defends against forged cookies
+    with more entries."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data["last_adjacent_nocs"] = ["14200", "13110", "13100", "14400", "14401"]
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.last_adjacent_nocs == ("14200", "13110", "13100")
+    assert len(s2.last_adjacent_nocs) == 3
+
+
+def test_sanitize_last_adjacent_nocs_dedupes() -> None:
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data["last_adjacent_nocs"] = ["14200", "14200", "13110", "13110"]
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.last_adjacent_nocs == ("14200", "13110")
+
+
+def test_sanitize_last_adjacent_nocs_drops_non_list_input() -> None:
+    """A forged cookie with a string / dict / int instead of a list
+    collapses to empty tuple."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    for bad in ("14200", 42, {"noc": "14200"}, True):
+        data["last_adjacent_nocs"] = bad
+        s2 = StagedProfile.from_json(_json.dumps(data))
+        assert s2.last_adjacent_nocs == (), (
+            f"forged value {bad!r} (type {type(bad).__name__}) was not "
+            f"sanitized to empty tuple"
+        )
+
+
+def test_cookie_round_trip_legacy_blob_without_last_adjacent_nocs_key() -> None:
+    """A pre-Step-4 cookie blob (no last_adjacent_nocs key) must load
+    cleanly with the dataclass default."""
+    import json as _json
+    s = StagedProfile.new("sess-1")
+    data = _json.loads(s.to_json(redact_for_cookie=True))
+    data.pop("last_adjacent_nocs", None)
+    s2 = StagedProfile.from_json(_json.dumps(data))
+    assert s2.last_adjacent_nocs == ()

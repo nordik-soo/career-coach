@@ -1362,34 +1362,12 @@ def test_recommender_evidence_equality_by_value():
 
 
 # ---------------------------------------------------------------------------
-# No-consumer guard for Slice 1
+# Slice 1 contract -- no-consumer guard deleted Slice 5 step 4
+# (2026-06-19). The conversational recommender now imports gap_evidence
+# from recommender_assembly + responder + handler. Per the guard's own
+# instructions: "delete the test in the same diff that adds the
+# consumer." Tests for the new consumers live in:
+#   tests/test_recommender_assembly.py
+#   tests/test_recommender_fallback.py
+#   tests/test_recommender_chain.py
 # ---------------------------------------------------------------------------
-def test_gap_evidence_is_not_yet_consumed_by_production_layers():
-    """Slice 1 contract: nothing in production code under skillbridge/
-    imports or references `gap_evidence` yet. The detector slices (2-4)
-    add internal references; Slice 5 wires the consumers.
-
-    If this test fails because a legitimate consumer was added, delete
-    the test in the same diff that introduces the consumer.
-    """
-    from pathlib import Path
-
-    repo_root = Path(__file__).resolve().parent.parent
-    skillbridge_dir = repo_root / "skillbridge"
-
-    sentinel = "gap_evidence"
-    hits: list[str] = []
-    for path in skillbridge_dir.rglob("*.py"):
-        if path.name == "gap_evidence.py":
-            continue  # defines it
-        text = path.read_text(encoding="utf-8")
-        if sentinel in text:
-            hits.append(str(path.relative_to(repo_root)))
-
-    assert not hits, (
-        "Slice 1 contract: no production layer should import or call "
-        f"gap_evidence yet. Found references in: {hits}. "
-        "If you intentionally wired a consumer in Slice 5 (or in an "
-        "internal helper for Slices 2-4), delete this test in the "
-        "same diff that adds the consumer."
-    )

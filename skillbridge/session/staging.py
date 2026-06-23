@@ -384,6 +384,52 @@ class StagedProfile:
     #     alongside the recommender response.
     pending_recommender_offer: str | None = None
 
+    # Slice 5 step 4 (2026-06-19): adjacent NOC codes captured at the
+    # present_tiered_matches turn so the adjacent_noc_standard
+    # recommender mode (locked design third in the chain) can compute
+    # against the same NOCs the user saw earlier in the conversation.
+    #
+    # WHY a separate field and not last_adjacent_snapshot.items:
+    #   last_adjacent_snapshot powers ordinal follow-up
+    #   ("tell me about the second one") and has its own sanitizer,
+    #   tests, and cookie budget. Its `items` shape carries
+    #   job_id/title/evidence_summary/why_adjacent/matched_skills but
+    #   NO noc_code -- a deliberate separation. Mixing noc_code into
+    #   that shape would conflate two purposes (ordinal-follow-up vs
+    #   per-NOC OaSIS comparison).
+    #
+    # SHAPE: tuple of unique exact-5-digit NOC codes, max 3.
+    # Layer C's recommender fetches the human-readable NOC title
+    # from OaSIS at compute time (reference.occupation via the
+    # existing JOIN in gap_evidence._LAYER_A_SQL), so codes-only is
+    # sufficient and minimises cookie footprint.
+    #
+    # LIFECYCLE (chain-bound, NOT time-based):
+    #   - Captured: when present_tiered_matches emits AND
+    #     tier_evidence.sideways_move has records. Extract unique
+    #     noc_code from each AdjacentJob; cap at 3 by order received.
+    #   - Cleared: target_role_text change (per-target hard reset);
+    #     fresh tier-match turn overwrites the previous value;
+    #     after adjacent_noc_standard recommender turn finishes
+    #     (chain natural end -- the handler sets
+    #     pending_recommender_offer = None AND clears this field
+    #     simultaneously); user declines at any chain step (the
+    #     handler clears the chain-bound state).
+    #   - NO time-based TTL. The chain itself bounds the lifetime.
+    #
+    # COOKIE COST: 3 codes x 5 chars + JSON framing ~25-30 bytes
+    # worst case. Lossless minification when empty drops the key
+    # entirely. Defensive deserialization filters out non-string
+    # entries and codes that fail _is_valid_noc_code (exact 5
+    # digits).
+    #
+    # NOT included in this slice:
+    #   - SET write point (handler.py:~2497 SET swap is part of
+    #     Step 4 as a whole; this slice only adds the field/lifecycle
+    #     plumbing on StagedProfile).
+    #   - Layer C consumer logic (Step 4 dispatch branch).
+    last_adjacent_nocs: tuple[str, ...] = field(default_factory=tuple)
+
     # ----------------------------------------------- attribute interception
     def __setattr__(self, name: str, value: Any) -> None:
         """Invalidate cached target_noc when target_role_text changes.
@@ -436,6 +482,12 @@ class StagedProfile:
                 # the prior offer was about the prior target's gaps.
                 # Same per-target lifecycle as pending_adjacent_search_offer.
                 self.__dict__["pending_recommender_offer"] = None
+                # Slice 5 step 4 (2026-06-19): target switch also
+                # invalidates the adjacent-NOC list captured at the
+                # prior target's tier-match turn. The new target will
+                # surface a new sideways_move with potentially
+                # different adjacent NOCs.
+                self.__dict__["last_adjacent_nocs"] = ()
         # Fresh-intake-on-target-change pillar (2026-06-15) — stamp
         # experience alignment on ANY non-empty experience_text
         # assignment. Catching this here (not just in merge_fields)
@@ -626,6 +678,14 @@ class StagedProfile:
             # reconstructs the default from absent keys.
             if data.get("pending_recommender_offer") is None:
                 data.pop("pending_recommender_offer", None)
+            # Slice 5 step 4 (2026-06-19): lossless minification for
+            # last_adjacent_nocs. Empty tuple is the default; drop
+            # the key. from_json reconstructs the default from
+            # absence. Worst-case populated cost is ~25-30 bytes
+            # (3 codes x 5 chars + JSON framing).
+            adj_nocs = data.get("last_adjacent_nocs")
+            if not adj_nocs:  # () or [] or None
+                data.pop("last_adjacent_nocs", None)
         return json.dumps(data, separators=(",", ":"))
 
     @classmethod
@@ -692,6 +752,14 @@ class StagedProfile:
         if "pending_recommender_offer" in data:
             data["pending_recommender_offer"] = _sanitize_pending_recommender_offer(
                 data["pending_recommender_offer"]
+            )
+        # Slice 5 step 4 (2026-06-19): last_adjacent_nocs is a tuple
+        # of exact 5-digit NOC codes. Sanitizer drops malformed
+        # entries (non-str, wrong length, non-digit) and caps at 3.
+        # Empty tuple is the default when the key is absent.
+        if "last_adjacent_nocs" in data:
+            data["last_adjacent_nocs"] = _sanitize_last_adjacent_nocs(
+                data["last_adjacent_nocs"]
             )
         return cls(**data, skills=skills)
 
@@ -899,6 +967,41 @@ def _sanitize_pending_recommender_offer(value: Any) -> str | None:
     if isinstance(value, str) and value in _VALID_RECOMMENDER_MODES:
         return value
     return None
+
+
+_MAX_LAST_ADJACENT_NOCS: int = 3
+
+
+def _sanitize_last_adjacent_nocs(value: Any) -> tuple[str, ...]:
+    """Defensive-deserialize last_adjacent_nocs. Returns a tuple of
+    exact-5-digit NOC code strings, capped at _MAX_LAST_ADJACENT_NOCS.
+    Drops any entry that:
+      - is not a string
+      - is not exactly 5 characters after strip
+      - has any non-digit character
+
+    A forged cookie cannot inject malformed NOC codes that would
+    fail the Layer C SQL fetch or route to nonexistent
+    occupations. Slice 5 step 4 invariant; mirrors the validation
+    in gap_evidence._is_valid_noc_code so the data shape matches
+    what Layer C expects to read."""
+    if not isinstance(value, (list, tuple)):
+        return ()
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, str):
+            continue
+        code = entry.strip()
+        if len(code) != 5 or not code.isdigit():
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+        if len(out) >= _MAX_LAST_ADJACENT_NOCS:
+            break
+    return tuple(out)
 
 
 def _sanitize_adjacent_snapshot(value: Any) -> dict[str, Any] | None:

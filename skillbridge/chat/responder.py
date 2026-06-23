@@ -88,8 +88,17 @@ from skillbridge.chat.coach_tiers_policy import (
     check_ungrounded_provider_for_tiered_matches,
 )
 from skillbridge.chat.pipeline_snapshot import PipelineSnapshot
-from skillbridge.chat.prompts import COACH_TIERS_RESPONDER_PROMPT
+from skillbridge.chat.prompts import (
+    COACH_TIERS_RESPONDER_PROMPT,
+    RECOMMENDER_RESPONDER_PROMPT,
+)
 from skillbridge.chat.tiered_evidence import TieredEvidence
+# Slice 5 step 4 (2026-06-19) -- recommender response dispatch.
+from skillbridge.chat.gap_evidence import RecommenderEvidence
+from skillbridge.chat.recommender_fallback import render_recommender_fallback
+# Step 3 (2026-06-22): voice_hint carrier for intent-driven recommender
+# dispatch. Plumbed only; prompt does not branch on it yet.
+from skillbridge.chat.recommender_intent import CareerIntent
 
 log = logging.getLogger(__name__)
 
@@ -1059,6 +1068,20 @@ class ResponderV2Input:
     # fallback both quote this verbatim — no paraphrase, no
     # invention.
     cp4_primary_gap: str | None = None
+    # Slice 5 step 4 (2026-06-19): conversational recommender payload.
+    # Populated by the handler ONLY on chained recommender turns. When
+    # set, compose_response_v2 EARLY-DISPATCHES to the recommender path
+    # (the legacy v2 view builder + LLM happy path are skipped). One mode
+    # per turn -- the wrapper's `mode` field discriminates which prompt
+    # section the LLM activates. See
+    # project_recommender_step4_implementation_lock memory.
+    recommendation_evidence: RecommenderEvidence | None = None
+    # Step 3 peer-engine wiring (2026-06-22): the original CareerIntent
+    # that drove this turn's recommender dispatch. Plumbed for future
+    # voice-branching in Layer B prompts (skill_gap vs training_
+    # recommendation). Currently NOT read by the prompt; a follow-up
+    # slice will wire it in. See project_recommender_peer_engine_locked.
+    recommender_voice_hint: CareerIntent | None = None
 
 
 def compose_response_v2(inp: ResponderV2Input) -> str:
@@ -1088,6 +1111,16 @@ def compose_response_v2(inp: ResponderV2Input) -> str:
     # it for these paths entirely.
     if inp.clarification_payload is not None:
         return _render_clarification(inp.clarification_payload)
+
+    # Slice 5 step 4 (2026-06-19): conversational recommender. When the
+    # handler has populated `recommendation_evidence`, the recommender
+    # owns this turn end-to-end -- no legacy view build, no OUTCOME_
+    # RESPONDER_PROMPT call. The local_gap_coach mode is the only one
+    # that can carry TrainingResource URLs; those come from the
+    # registry-verified wrapper and pass surface_url(today) by
+    # construction.
+    if inp.recommendation_evidence is not None:
+        return _compose_recommender_response(inp)
 
     # Rule 3 (router): training_request without a registry entity gets
     # a deterministic static question rather than a role-aware skills
@@ -3379,6 +3412,81 @@ _FORBIDDEN_ACHIEVABILITY_WORDS: tuple[str, ...] = (
 # grounding + safety rules (URL allowlist, ungrounded provider,
 # salary/region/legal/leakage, internal-token leakage, forbidden
 # achievability words, ends-with-?). Old shape helpers removed.
+
+
+def _build_user_block_for_recommender(inp: ResponderV2Input) -> str:
+    """Serialize the RecommenderEvidence wrapper into the prompt's
+    EVIDENCE PACKAGE block. Mirrors the shape documented in
+    RECOMMENDER_RESPONDER_PROMPT: USER_MESSAGE, MODE, EVIDENCE, TRAINING.
+
+    The local_gap_coach mode is the ONLY mode that surfaces a non-empty
+    TRAINING block; the prompt's hard rule prevents the LLM from naming
+    providers in the other modes regardless of what we send, but we
+    keep TRAINING empty for those modes to avoid any accidental leak.
+    """
+    rec = inp.recommendation_evidence
+    assert rec is not None  # caller guards
+    payload = {
+        "USER_MESSAGE": inp.user_message,
+        "MODE": rec.mode,
+        "EVIDENCE": [
+            {
+                "skill_id": g.skill_id,
+                "skill_name": g.skill_name,
+                "blocker": g.blocker,
+                "importance": g.importance,
+                "source_id": g.source_id,
+                "source_label": g.source_label,
+            }
+            for g in rec.evidence
+        ],
+        "TRAINING": [
+            {
+                "skill_id": t.skill_id,
+                "skill_name": t.skill_name,
+                "provider": t.provider,
+                "type": t.type,
+                "url": t.url,
+                "summary": t.summary,
+            }
+            for t in rec.training
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _compose_recommender_response(inp: ResponderV2Input) -> str:
+    """Render the conversational recommender surface -- LLM-first with
+    deterministic per-mode fallback.
+
+    Falls back to render_recommender_fallback when:
+      - LLM is disabled at config level;
+      - LLM returns an empty / falsy reply.
+
+    No policy gate in this slice: the recommender wrapper carries only
+    registry-verified URLs (surface_url(today) is enforced at
+    wrapper-assembly time), and the prompt's CRITICAL HARD RULE
+    constrains cross-mode leakage. A dedicated recommender policy
+    gate can be added in a later slice when live traffic surfaces
+    failure modes worth catching at policy level.
+    """
+    rec = inp.recommendation_evidence
+    if rec is None:
+        log.error(
+            "responder: _compose_recommender_response invoked without "
+            "recommendation_evidence; handler contract violation.",
+        )
+        return render_recommender_fallback(None)
+
+    if not is_enabled():
+        return render_recommender_fallback(rec)
+
+    user_block = _build_user_block_for_recommender(inp)
+    reply = call(RECOMMENDER_RESPONDER_PROMPT, user_block, max_tokens=800)
+    if not reply:
+        return render_recommender_fallback(rec)
+
+    return reply
 
 
 def _compose_tiered_matches_response(inp: ResponderV2Input) -> str:
