@@ -140,6 +140,26 @@ RULES:
    - "compare me to the standard" -> `noc_standard_comparison`
    - "what else can I do?" -> `career_exploration`
 6. If `TARGET_ROLE_TEXT` contains a value that looks like the user's question echoed back (e.g. ends with "?", starts with a question word, or otherwise reads as a phrase rather than a role title), treat it as null for the purposes of this classification. A poisoned target context must not suppress a clear intent signal.
+7. SLOT-FILL ANSWERS ARE NOT RECOMMENDER INTENTS. When `LAST_ASSISTANT_MOVE` names a substrate slot the system just asked for, and the user's message looks like they are answering that slot, classify as `unclear`. Slot fills are intake substrate, not recommender intent. The substrate gate and existing planner intake handle them downstream.
+
+   Open-text slots the system asks for (treat as substrate context):
+     - skills_text       (system asked: "tell me your skills" or "what software have you used")
+     - target_role_text  (system asked: "what role" or "what kind of work")
+     - experience_text   (system asked: "tell me about your work history")
+     - education_text    (system asked: "tell me about your education")
+     - transportation_text / availability_text / salary_expectation_text
+
+   Examples of slot fills that MUST classify as `unclear`:
+     - LAST_ASSISTANT_MOVE=skills_text, USER_MESSAGE="I've done bookkeeping, QuickBooks, Excel, payroll" -> `unclear`
+     - LAST_ASSISTANT_MOVE=skills_text, USER_MESSAGE="forklift, customer service, cash handling" -> `unclear`
+     - LAST_ASSISTANT_MOVE=target_role_text, USER_MESSAGE="accounting clerk" -> `unclear`
+     - LAST_ASSISTANT_MOVE=target_role_text, USER_MESSAGE="something in healthcare" -> `unclear`
+     - LAST_ASSISTANT_MOVE=experience_text, USER_MESSAGE="5 years at Walmart as a cashier" -> `unclear`
+
+   EXCEPTION: if the user's message explicitly names a different intent ALONGSIDE the slot answer, classify the explicit intent. Example:
+     - LAST_ASSISTANT_MOVE=skills_text, USER_MESSAGE="bookkeeping, QuickBooks -- and what training should I take for accounting?" -> `training_recommendation` (explicit recommender ask wins)
+
+   The principle: slot fills go to substrate; intent questions go to recommender; mixed messages let the explicit intent win.
 """
 
 

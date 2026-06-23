@@ -545,6 +545,19 @@ _RECOMMENDER_NEXT_MODE: dict[str, str | None] = {
 }
 
 
+# Slice 1 follow-up (2026-06-23): which CareerIntent values can be
+# deferred across a substrate-fill turn. job_matching is never
+# deferred (matching engine has its own intake). unclear is never
+# deferred (no intent to remember). The other five are deferrable.
+_DEFERRABLE_CAREER_INTENTS: frozenset[str] = frozenset({
+    "local_skill_gap",
+    "training_recommendation",
+    "noc_standard_comparison",
+    "career_exploration",
+    "application_help_out_of_scope",
+})
+
+
 def _classify_recommender_consent(message: str) -> str:
     """Classify the user's reply to a recommender chain offer. Wraps
     the existing `_classify_pattern_2_reply` -- same yes/no/other
@@ -954,14 +967,50 @@ def _maybe_route_recommender_from_intent(
 
     try:
         pattern_intent = _classify_intent(message)
+        # Slice 1 (2026-06-23): thread last_asked_slot[0] as the
+        # last_assistant_move context. Slot answers ("I've done X, Y, Z"
+        # after the system asked for skills_text) used to misclassify as
+        # recommender intent because the classifier had null context.
+        last_asked_slot = (
+            staged.last_asked_slots[0]
+            if staged.last_asked_slots else None
+        )
         career_intent = classify_career_intent(
             message=message,
             pending_recommender_offer=staged.pending_recommender_offer,
             target_role_text=staged.target_role_text,
-            last_assistant_move=None,  # threading deferred; cache key tolerates None
+            last_assistant_move=last_asked_slot,
         )
         chat_skill_count = len(staged.skills or [])
         has_resume = _resume_facts_have_content(staged.resume_facts_json)
+
+        # Slice 1 (2026-06-23): consume deferred_career_intent.
+        # When the current message classifies as `unclear` (e.g. a
+        # bare slot fill) AND a prior turn deferred a recommender
+        # intent because substrate was missing, route to the
+        # deferred intent instead of letting it drop silently.
+        # Explicit current intent (non-unclear) ALWAYS wins over
+        # the deferred one -- the user has moved on.
+        deferred = staged.deferred_career_intent
+        if career_intent != "unclear":
+            # Current intent wins; clear any deferred holdover.
+            if deferred is not None:
+                staged.deferred_career_intent = None
+        elif deferred is not None and deferred in _DEFERRABLE_CAREER_INTENTS:
+            # Current message has no clear intent; revive the
+            # deferred one. The substrate gate below decides whether
+            # it can fire NOW (target+skills present) or still has
+            # to wait. We clear the deferred flag in either case --
+            # if substrate is still missing, the router emits
+            # ask_substrate again with deferred_intent re-set from
+            # the verdict; if substrate is sufficient, the layer
+            # dispatches and the intent has been honoured.
+            career_intent = deferred  # type: ignore[assignment]
+            staged.deferred_career_intent = None
+            log.info(
+                "recommender_routing session=%s deferred_intent_consumed=%s",
+                staged.session_id[:8], deferred,
+            )
 
         # Resolve target_role_text -> target_noc before substrate check.
         # target_noc is normally populated by the matching engine via
@@ -1017,22 +1066,45 @@ def _maybe_route_recommender_from_intent(
         return None  # let existing flow handle
 
     if verdict.action == "out_of_scope_canned":
+        # No slot is being asked -- system is redirecting. Don't
+        # pollute last_asked_slots with a target/skills hint.
         return _emit_canned_response(
             staged=staged, store=store,
             reply=_OUT_OF_SCOPE_CANNED, resume_info=None,
+            asked_slot=None,
         )
 
     if verdict.action == "ask_substrate":
+        # Slice 1 follow-up (2026-06-23): the ask carries an
+        # explicit slot the next turn's reply is answering. Set
+        # last_asked_slots so the extractor + classifier + fallback
+        # fill all share the same understanding of what slot is
+        # being filled. For "both missing", target is the first
+        # gate (we ask for it first; substrate gate re-emits ask
+        # for skills on the following turn after target fills).
         missing = set(verdict.missing)
         if missing == {"target"}:
             reply = _ASK_TARGET_CANNED
+            asked_slot = "target_role_text"
         elif missing == {"skills"}:
             reply = _ASK_SKILLS_CANNED
+            asked_slot = "skills_text"
         else:
             reply = _ASK_BOTH_CANNED
+            asked_slot = "target_role_text"
+        # Persist the deferred intent so the next turn (after the
+        # user provides substrate) can route to it instead of
+        # dropping silently. Only persist deferrable intents per
+        # the closed set above.
+        if (
+            verdict.deferred_intent is not None
+            and verdict.deferred_intent in _DEFERRABLE_CAREER_INTENTS
+        ):
+            staged.deferred_career_intent = verdict.deferred_intent
         return _emit_canned_response(
             staged=staged, store=store,
             reply=reply, resume_info=None,
+            asked_slot=asked_slot,
         )
 
     if verdict.action == "recommender_layer":
@@ -1065,12 +1137,23 @@ def _emit_canned_response(
     store,
     reply: str,
     resume_info: dict[str, Any] | None,
+    asked_slot: str | None = None,
 ) -> dict[str, Any]:
     """Shared shape for canned-text responses (ask_substrate +
     out_of_scope_canned). Does NOT mutate intake_state or pending
     flags -- routing chose to bypass the engines this turn, but the
     user's session continues from its current state on the next turn.
+
+    asked_slot (Slice 1 follow-up 2026-06-23): when set, updates
+    `staged.last_asked_slots` so the next turn's extractor + bridge
+    + fallback_fill all know which slot the system just asked for.
+    Without this, an ask_substrate canned response would leave
+    `last_asked_slots` stale (or empty) and the next turn's reply
+    couldn't be recognised as a slot answer.
+    Pass None for out-of-scope responses (no slot asked).
     """
+    if asked_slot is not None:
+        staged.last_asked_slots = [asked_slot]
     staged.touch()
     new_session_id = store.save(staged)
     return {
@@ -1078,7 +1161,7 @@ def _emit_canned_response(
         "profile_id": None,
         "session_id": new_session_id,
         "intake_state": staged.intake_state,
-        "asked_slots": [],
+        "asked_slots": [asked_slot] if asked_slot else [],
         "next_action": intake_state.ACTION_ASK_QUESTIONS,
         "recommended_jobs": [],
         "next_skill_suggestion": None,

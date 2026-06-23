@@ -430,6 +430,34 @@ class StagedProfile:
     #   - Layer C consumer logic (Step 4 dispatch branch).
     last_adjacent_nocs: tuple[str, ...] = field(default_factory=tuple)
 
+    # Slice 1 follow-up (2026-06-23): deferred career intent.
+    # When the router emits `ask_substrate` because target or skills
+    # are missing, this field remembers WHICH recommender intent the
+    # user was about to express, so the next turn (after substrate
+    # fills) can route to that intent instead of dropping it.
+    #
+    # SHAPE: one of the CareerIntent literal values
+    # (local_skill_gap | training_recommendation |
+    #  noc_standard_comparison | career_exploration |
+    #  application_help_out_of_scope) or None.
+    # job_matching is NEVER deferred (matching engine has its own
+    # intake; no substrate gating). unclear is NEVER deferred (no
+    # intent to remember).
+    #
+    # LIFECYCLE:
+    #   - Set: when _maybe_route_recommender_from_intent emits an
+    #     ask_substrate verdict carrying a deferred_intent
+    #   - Consumed: when the next turn brings the substrate to
+    #     sufficient AND the current message classifies as `unclear`
+    #     (user is just providing substrate, not naming a new
+    #     intent). The bridge then routes to the deferred intent
+    #     and clears the field.
+    #   - Cleared (no consumption): target_role_text change
+    #     (substrate invalidated); explicit non-unclear intent in
+    #     the current message (the new intent supersedes the
+    #     deferred one).
+    deferred_career_intent: str | None = None
+
     # ----------------------------------------------- attribute interception
     def __setattr__(self, name: str, value: Any) -> None:
         """Invalidate cached target_noc when target_role_text changes.
@@ -488,6 +516,19 @@ class StagedProfile:
                 # surface a new sideways_move with potentially
                 # different adjacent NOCs.
                 self.__dict__["last_adjacent_nocs"] = ()
+                # Slice 1 follow-up (2026-06-23): clear deferred
+                # career intent ONLY on a true target switch (prior
+                # value existed and new differs). On a FIRST target
+                # fill (current was None/empty), the deferred intent
+                # was set with no target yet WAITING for substrate
+                # to fulfill so the router can consume it on the
+                # next turn. Clearing on first-fill would silently
+                # drop the user's intent.
+                prior_target_existed = (
+                    isinstance(current, str) and current.strip() != ""
+                )
+                if prior_target_existed:
+                    self.__dict__["deferred_career_intent"] = None
         # Fresh-intake-on-target-change pillar (2026-06-15) — stamp
         # experience alignment on ANY non-empty experience_text
         # assignment. Catching this here (not just in merge_fields)
@@ -686,6 +727,11 @@ class StagedProfile:
             adj_nocs = data.get("last_adjacent_nocs")
             if not adj_nocs:  # () or [] or None
                 data.pop("last_adjacent_nocs", None)
+            # Slice 1 follow-up (2026-06-23): lossless minification for
+            # deferred_career_intent. None is the default; drop the key
+            # so empty state pays zero bytes.
+            if data.get("deferred_career_intent") is None:
+                data.pop("deferred_career_intent", None)
         return json.dumps(data, separators=(",", ":"))
 
     @classmethod
@@ -760,6 +806,14 @@ class StagedProfile:
         if "last_adjacent_nocs" in data:
             data["last_adjacent_nocs"] = _sanitize_last_adjacent_nocs(
                 data["last_adjacent_nocs"]
+            )
+        # Slice 1 follow-up (2026-06-23): deferred_career_intent is one
+        # of a closed enum of strings or None. Sanitizer accepts only
+        # valid CareerIntent values (minus job_matching and unclear
+        # which are never deferred); anything else coerces to None.
+        if "deferred_career_intent" in data:
+            data["deferred_career_intent"] = _sanitize_deferred_career_intent(
+                data["deferred_career_intent"]
             )
         return cls(**data, skills=skills)
 
@@ -1002,6 +1056,36 @@ def _sanitize_last_adjacent_nocs(value: Any) -> tuple[str, ...]:
         if len(out) >= _MAX_LAST_ADJACENT_NOCS:
             break
     return tuple(out)
+
+
+# Slice 1 follow-up (2026-06-23): deferred career intents we accept.
+# Mirrors the CareerIntent literal in recommender_intent.py minus
+# the values that are never deferrable: `job_matching` (matching
+# engine has its own intake) and `unclear` (no intent to defer).
+_VALID_DEFERRED_CAREER_INTENTS: frozenset[str] = frozenset({
+    "local_skill_gap",
+    "training_recommendation",
+    "noc_standard_comparison",
+    "career_exploration",
+    "application_help_out_of_scope",
+})
+
+
+def _sanitize_deferred_career_intent(value: Any) -> str | None:
+    """Defensive-deserialize deferred_career_intent. Returns the
+    string if it's one of the deferrable CareerIntent literal
+    values; None otherwise.
+
+    A forged cookie cannot inject an arbitrary intent string that
+    the router would then act on -- only the closed set above is
+    accepted. Mirrors the validation pattern in
+    _sanitize_pending_recommender_offer.
+    """
+    if not isinstance(value, str):
+        return None
+    if value not in _VALID_DEFERRED_CAREER_INTENTS:
+        return None
+    return value
 
 
 def _sanitize_adjacent_snapshot(value: Any) -> dict[str, Any] | None:

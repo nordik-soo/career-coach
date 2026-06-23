@@ -596,6 +596,438 @@ def test_classifier_prompt_warns_about_poisoned_target_context():
     )
 
 
+# ---------------------------------------------------------------------------
+# Slice 1 follow-up (2026-06-23): classifier context + deferred intent
+# ---------------------------------------------------------------------------
+def test_classifier_prompt_has_slot_fill_rule():
+    """Rule 7 must exist: slot-fill answers must NOT classify as
+    recommender intent."""
+    from skillbridge.chat import recommender_intent as ri
+    prompt = ri._SYSTEM_PROMPT.lower()
+    assert (
+        "slot-fill answers are not recommender intents" in prompt
+        or "slot fills are not recommender intents" in prompt
+    )
+
+
+@pytest.mark.parametrize("slot_name", [
+    "skills_text",
+    "target_role_text",
+    "experience_text",
+    "education_text",
+])
+def test_classifier_prompt_lists_open_text_slot_names(slot_name):
+    """The Rule 7 examples must reference the open-text slot names
+    so the LLM knows what last_assistant_move values mean."""
+    from skillbridge.chat import recommender_intent as ri
+    assert slot_name in ri._SYSTEM_PROMPT
+
+
+def test_bridge_threads_last_asked_slot_to_classifier(monkeypatch):
+    """The bridge must pass staged.last_asked_slots[0] as
+    last_assistant_move to classify_career_intent. Without this,
+    slot-fill answers misclassify when context is missing."""
+    captured: dict = {}
+
+    def fake_classify(**kwargs):
+        captured.update(kwargs)
+        return "unclear"
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        fake_classify,
+    )
+    sp = _make_staged()
+    sp.last_asked_slots = ["skills_text"]
+    h._maybe_route_recommender_from_intent(
+        staged=sp,
+        message="bookkeeping, QuickBooks, Excel",
+        store=_StubStore(),
+    )
+    assert captured.get("last_assistant_move") == "skills_text"
+
+
+def test_bridge_threads_none_when_last_asked_slots_empty(monkeypatch):
+    captured: dict = {}
+
+    def fake_classify(**kwargs):
+        captured.update(kwargs)
+        return "unclear"
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        fake_classify,
+    )
+    sp = _make_staged()
+    sp.last_asked_slots = []
+    h._maybe_route_recommender_from_intent(
+        staged=sp, message="hello", store=_StubStore(),
+    )
+    assert captured.get("last_assistant_move") is None
+
+
+def test_deferred_intent_persisted_on_ask_substrate(monkeypatch):
+    """When the router emits ask_substrate with a deferred_intent, the
+    bridge persists it on staged so the next turn can consume it."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "local_skill_gap",
+    )
+    sp = _make_staged(target_role=None, target_noc=None)  # missing target
+    assert sp.deferred_career_intent is None  # default
+    h._maybe_route_recommender_from_intent(
+        staged=sp, message="what should I improve?", store=_StubStore(),
+    )
+    # Router emits ask_substrate with deferred_intent=local_skill_gap;
+    # bridge persists it.
+    assert sp.deferred_career_intent == "local_skill_gap"
+
+
+def test_deferred_intent_consumed_when_substrate_fills(monkeypatch):
+    """When a prior turn set deferred_career_intent and this turn's
+    message classifies as `unclear` AND substrate is now sufficient,
+    the bridge routes to the deferred intent and clears the flag."""
+    _stub_engine_and_layer_a(monkeypatch)
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "unclear",
+    )
+    sp = _make_staged()  # substrate is sufficient by default
+    sp.deferred_career_intent = "local_skill_gap"
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="bookkeeping, quickbooks",
+        store=_StubStore(),
+    )
+    assert out is not None
+    # The deferred intent was used to route -- chain advanced.
+    assert sp.pending_recommender_offer == "target_noc_standard"
+    # And the flag was cleared.
+    assert sp.deferred_career_intent is None
+
+
+def test_explicit_current_intent_clears_deferred(monkeypatch):
+    """If the current message has an explicit non-unclear intent,
+    the deferred intent gets cleared (current wins over deferred)."""
+    _stub_engine_and_layer_a(monkeypatch)
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "training_recommendation",  # explicit current intent
+    )
+    sp = _make_staged()
+    sp.deferred_career_intent = "noc_standard_comparison"  # stale deferred
+    h._maybe_route_recommender_from_intent(
+        staged=sp, message="what training should I take?",
+        store=_StubStore(),
+    )
+    # Deferred was overridden, not consumed, and cleared.
+    assert sp.deferred_career_intent is None
+
+
+def test_deferred_intent_not_revived_for_invalid_value(monkeypatch):
+    """Defensive: a malformed deferred_career_intent value (e.g.
+    forged cookie) is treated as null and falls through to default
+    routing."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "unclear",
+    )
+    sp = _make_staged()
+    # Bypass setattr to inject a value the sanitizer would reject.
+    sp.__dict__["deferred_career_intent"] = "garbage_intent"
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="hello", store=_StubStore(),
+    )
+    # Not consumed (garbage isn't in _DEFERRABLE_CAREER_INTENTS).
+    # action=default -> falls through (returns None).
+    assert out is None
+
+
+def test_deferred_intent_cleared_on_target_change():
+    """Target change invalidates deferred intent (same lifecycle as
+    pending_recommender_offer and last_adjacent_nocs)."""
+    sp = _make_staged(target_role="accounting clerk")
+    sp.deferred_career_intent = "local_skill_gap"
+    sp.target_role_text = "truck driver"  # change
+    assert sp.deferred_career_intent is None
+
+
+def test_deferred_intent_field_default_none():
+    """Fresh StagedProfile has deferred_career_intent=None."""
+    sp = StagedProfile.new("s1")
+    assert sp.deferred_career_intent is None
+
+
+def test_deferred_intent_sanitizer_accepts_valid_values():
+    """Sanitizer accepts each of the five deferrable values."""
+    from skillbridge.session.staging import _sanitize_deferred_career_intent
+    for valid in (
+        "local_skill_gap",
+        "training_recommendation",
+        "noc_standard_comparison",
+        "career_exploration",
+        "application_help_out_of_scope",
+    ):
+        assert _sanitize_deferred_career_intent(valid) == valid
+
+
+def test_deferred_intent_sanitizer_rejects_invalid_values():
+    """Sanitizer rejects job_matching, unclear, garbage, and non-str."""
+    from skillbridge.session.staging import _sanitize_deferred_career_intent
+    for invalid in (
+        "job_matching",     # never deferred
+        "unclear",          # never deferred
+        "garbage",
+        "",
+        None,
+        123,
+        ["local_skill_gap"],
+    ):
+        assert _sanitize_deferred_career_intent(invalid) is None
+
+
+def test_application_help_out_of_scope_can_be_deferred(monkeypatch):
+    """application_help_out_of_scope is in _DEFERRABLE_CAREER_INTENTS.
+    Even though it routes to a canned response (not a layer), it
+    can still be deferred if substrate is missing. Though in
+    practice the router emits out_of_scope_canned without a
+    substrate gate, this is defense-in-depth."""
+    from skillbridge.session.staging import _sanitize_deferred_career_intent
+    assert _sanitize_deferred_career_intent(
+        "application_help_out_of_scope"
+    ) == "application_help_out_of_scope"
+
+
+def test_cookie_minification_omits_default_deferred_intent():
+    """When deferred_career_intent is None (default), it should not
+    appear in the redacted-for-cookie serialization."""
+    sp = StagedProfile.new("s1")
+    blob = sp.to_json(redact_for_cookie=True)
+    import json as _json
+    data = _json.loads(blob)
+    assert "deferred_career_intent" not in data
+
+
+def test_cookie_minification_preserves_populated_deferred_intent():
+    sp = StagedProfile.new("s1")
+    sp.deferred_career_intent = "local_skill_gap"
+    blob = sp.to_json(redact_for_cookie=True)
+    import json as _json
+    data = _json.loads(blob)
+    assert data.get("deferred_career_intent") == "local_skill_gap"
+
+
+def test_cookie_roundtrip_preserves_deferred_intent():
+    sp = StagedProfile.new("s1")
+    sp.deferred_career_intent = "training_recommendation"
+    blob = sp.to_json(redact_for_cookie=True)
+    sp2 = StagedProfile.from_json(blob)
+    assert sp2.deferred_career_intent == "training_recommendation"
+
+
+def test_cookie_roundtrip_sanitizes_forged_deferred_intent():
+    """A forged cookie with an invalid deferred_career_intent string
+    must come back as None after defensive deserialization."""
+    sp = StagedProfile.new("s1")
+    # Forge by direct __dict__ assignment (bypasses any setter checks).
+    sp.__dict__["deferred_career_intent"] = "forged_value_not_in_enum"
+    blob = sp.to_json(redact_for_cookie=True)
+    sp2 = StagedProfile.from_json(blob)
+    assert sp2.deferred_career_intent is None
+
+
+# ---------------------------------------------------------------------------
+# Slice 1 follow-up review fixes (2026-06-23): two lifecycle bugs caught
+# in code review and patched before live verify.
+# ---------------------------------------------------------------------------
+def test_deferred_intent_survives_first_target_fill():
+    """CRITICAL bug fix: when target_role_text is set for the FIRST
+    time (current was None), the deferred intent MUST survive --
+    that's exactly the scenario it was set up to handle. Clearing
+    on first-fill would silently drop the user's intent.
+
+    Pre-fix behavior: deferred was cleared on every target change,
+    including first fill. Post-fix: only clears on a real switch
+    (prior non-empty target -> different new value)."""
+    sp = StagedProfile.new("s1")
+    sp.deferred_career_intent = "local_skill_gap"
+    assert sp.target_role_text is None  # first-fill setup
+    sp.target_role_text = "accounting clerk"  # first fill
+    assert sp.deferred_career_intent == "local_skill_gap"  # SURVIVES
+
+
+def test_deferred_intent_survives_empty_to_real_fill():
+    """Variant of first-fill: prior target was empty string, then
+    user provides a real role. Still treated as first-fill."""
+    sp = StagedProfile.new("s1")
+    sp.__dict__["target_role_text"] = ""  # forge empty string state
+    sp.deferred_career_intent = "training_recommendation"
+    sp.target_role_text = "nurse"
+    assert sp.deferred_career_intent == "training_recommendation"
+
+
+def test_deferred_intent_cleared_on_real_target_switch_only():
+    """Only a true target switch (non-empty prior -> different new)
+    clears the deferred intent. This is the existing 'change'
+    semantics, just made stricter for the deferred-intent case."""
+    sp = StagedProfile.new("s1")
+    sp.target_role_text = "accounting clerk"  # first fill
+    sp.deferred_career_intent = "local_skill_gap"
+    sp.target_role_text = "truck driver"  # REAL switch
+    assert sp.deferred_career_intent is None
+
+
+def test_deferred_intent_not_cleared_on_same_target_reassignment():
+    """Setting target_role_text to the SAME value (no-op) does not
+    clear the deferred intent."""
+    sp = StagedProfile.new("s1")
+    sp.target_role_text = "accounting clerk"
+    sp.deferred_career_intent = "local_skill_gap"
+    sp.target_role_text = "accounting clerk"  # identical value
+    assert sp.deferred_career_intent == "local_skill_gap"
+
+
+def test_canned_response_sets_last_asked_slots_for_target_missing(monkeypatch):
+    """When ask_substrate emits _ASK_TARGET_CANNED, last_asked_slots
+    must be set to ['target_role_text'] so the next turn's
+    extractor + bridge + fallback_fill share the same context."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "local_skill_gap",
+    )
+    sp = _make_staged(target_role=None, target_noc=None)
+    sp.last_asked_slots = []  # ensure clean slate
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="what should I improve?", store=_StubStore(),
+    )
+    assert out is not None
+    assert sp.last_asked_slots == ["target_role_text"]
+
+
+def test_canned_response_sets_last_asked_slots_for_skills_missing(monkeypatch):
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "noc_standard_comparison",
+    )
+    sp = _make_staged(skills=(), has_resume=False)  # target set, no skills
+    sp.last_asked_slots = []
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="compare me to standard", store=_StubStore(),
+    )
+    assert out is not None
+    assert sp.last_asked_slots == ["skills_text"]
+
+
+def test_canned_response_sets_target_first_when_both_missing(monkeypatch):
+    """When both are missing, last_asked_slots names target first --
+    target is the substrate gate (resolve target before asking for
+    skills makes intake coherent)."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "career_exploration",
+    )
+    sp = _make_staged(
+        target_role=None, target_noc=None, skills=(), has_resume=False,
+    )
+    sp.last_asked_slots = []
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="what else can I do", store=_StubStore(),
+    )
+    assert out is not None
+    assert sp.last_asked_slots == ["target_role_text"]
+
+
+def test_out_of_scope_canned_does_not_set_last_asked_slots(monkeypatch):
+    """Out-of-scope redirect doesn't ask for a slot. Don't pollute
+    last_asked_slots with a stale hint."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "application_help_out_of_scope",
+    )
+    sp = _make_staged()
+    sp.last_asked_slots = ["experience_text"]  # something pre-existing
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="help with my cover letter", store=_StubStore(),
+    )
+    assert out is not None
+    # Pre-existing value untouched -- bridge doesn't overwrite it.
+    assert sp.last_asked_slots == ["experience_text"]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: target-fill case the original tests missed
+# ---------------------------------------------------------------------------
+def test_end_to_end_intent_deferred_then_consumed_on_target_fill(monkeypatch):
+    """The full path the original implementation broke:
+    1. User asks recommender question with no target -> deferred set + ask_target
+    2. User answers with target role -> first-fill (deferred MUST survive)
+    3. Bridge runs on the same turn -- classifier returns unclear
+       for bare role name, deferred is consumed, layer dispatches.
+
+    This is the scenario test_deferred_intent_consumed_when_substrate_fills
+    didn't cover -- it pre-seeded substrate as already sufficient.
+    """
+    _stub_engine_and_layer_a(monkeypatch)
+    # Two-stage classifier mock: turn 1 returns local_skill_gap,
+    # turn 2 returns unclear (bare role name in a slot context).
+    call_count = {"n": 0}
+
+    def staged_classify(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return "local_skill_gap"
+        return "unclear"
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        staged_classify,
+    )
+    # Mock target -> noc resolution so substrate gate passes once
+    # target_role_text is set.
+    monkeypatch.setattr(
+        "skillbridge.match.occupation.resolve_title_to_noc",
+        lambda title, **kwargs: "14200" if "accounting" in (title or "").lower() else None,
+    )
+
+    sp = StagedProfile.new("s1")
+    sp.skills = [
+        # Force chat_skill_count >= 5 so skills gate is satisfied.
+        # (We're testing target-fill recovery, not skills recovery.)
+    ]
+    # Add 5 skills via direct mutation
+    from skillbridge.session.staging import StagedSkill
+    sp.skills = [
+        StagedSkill(skill_name=n, raw_phrase=n, confidence=1.0, source="chat")
+        for n in ["a", "b", "c", "d", "e"]
+    ]
+    store = _StubStore()
+
+    # Turn 1: user asks "what should I improve?" with no target
+    out1 = h._maybe_route_recommender_from_intent(
+        staged=sp, message="what should I improve?", store=store,
+    )
+    assert out1 is not None
+    # Canned ask emitted, deferred persisted.
+    assert sp.deferred_career_intent == "local_skill_gap"
+    assert sp.last_asked_slots == ["target_role_text"]
+
+    # Turn 2: user answers "accounting clerk" (first-fill scenario).
+    # Simulate the extractor binding the slot.
+    sp.target_role_text = "accounting clerk"  # FIRST fill
+    # After first-fill, deferred must STILL be set (the lifecycle fix).
+    assert sp.deferred_career_intent == "local_skill_gap"
+
+    # Now the bridge runs.
+    out2 = h._maybe_route_recommender_from_intent(
+        staged=sp, message="accounting clerk", store=store,
+    )
+    assert out2 is not None
+    # Classifier returned unclear, bridge consumed deferred ->
+    # routed to local_skill_gap -> dispatched local_gap_coach.
+    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Deferred was consumed.
+    assert sp.deferred_career_intent is None
+
+
 def test_target_noc_already_set_skips_resolver(monkeypatch):
     """If staged.target_noc is already populated (set by a prior
     matching turn), the bridge does NOT call the resolver again --
