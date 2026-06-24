@@ -192,6 +192,10 @@ def _stub_engine_and_layer_a(monkeypatch):
 
 
 def test_local_skill_gap_dispatches_layer_b(monkeypatch):
+    """local_skill_gap intent dispatches B. With _stub_engine_and_layer_a
+    stubs, Layer B is empty (no CP4 primary) and Layer C is empty
+    (no last_adjacent_nocs) -- cascade lands on A which has content
+    from the stubbed OaSIS rows. A is the new chain terminal."""
     monkeypatch.setattr(
         "skillbridge.chat.recommender_intent.classify_career_intent",
         lambda **kwargs: "local_skill_gap",
@@ -203,8 +207,9 @@ def test_local_skill_gap_dispatches_layer_b(monkeypatch):
     )
     assert out is not None
     assert isinstance(out["reply"], str) and out["reply"]
-    # Chain advances per existing _RECOMMENDER_NEXT_MODE (B -> A).
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Slice 2.5 chain B -> C -> A -> END. With these stubs, cascade
+    # lands on A (terminal) -> pending becomes None.
+    assert sp.pending_recommender_offer is None
 
 
 def test_noc_standard_dispatches_layer_a(monkeypatch):
@@ -219,8 +224,8 @@ def test_noc_standard_dispatches_layer_a(monkeypatch):
     )
     assert out is not None
     assert out["reply"]
-    # Chain: A -> C
-    assert sp.pending_recommender_offer == "adjacent_noc_standard"
+    # Slice 2.5: A is now chain terminal -> next mode is None.
+    assert sp.pending_recommender_offer is None
 
 
 def test_career_exploration_dispatches_layer_c(monkeypatch):
@@ -236,15 +241,18 @@ def test_career_exploration_dispatches_layer_c(monkeypatch):
     )
     assert out is not None
     assert out["reply"]
-    # Layer C is the chain terminal -> next mode is None.
-    assert sp.pending_recommender_offer is None
-    # last_adjacent_nocs cleared on chain end.
-    assert sp.last_adjacent_nocs == ()
+    # Slice 2.5: C is no longer terminal; C -> A. Pending advances to A.
+    assert sp.pending_recommender_offer == "target_noc_standard"
+    # last_adjacent_nocs is NOT cleared because the chain has not
+    # ended (A is the new terminal, not C).
+    assert sp.last_adjacent_nocs == ("13100",)
 
 
 def test_training_recommendation_routes_to_layer_b(monkeypatch):
-    """training_recommendation and local_skill_gap both route to
-    local_gap_coach (Layer B). voice_hint differentiates them."""
+    """training_recommendation and local_skill_gap both dispatch B.
+    With the stubs Layer B is empty -> cascade falls through to A
+    (terminal). voice_hint still differentiates them at the
+    ResponderV2Input level (covered by a separate test)."""
     monkeypatch.setattr(
         "skillbridge.chat.recommender_intent.classify_career_intent",
         lambda **kwargs: "training_recommendation",
@@ -255,8 +263,8 @@ def test_training_recommendation_routes_to_layer_b(monkeypatch):
         staged=sp, message="what training should I take", store=_StubStore(),
     )
     assert out is not None
-    # Same mode as local_skill_gap -- next chain mode is target_noc_standard
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Cascade lands on A (terminal) -> pending becomes None.
+    assert sp.pending_recommender_offer is None
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +410,14 @@ def test_voice_hint_passes_through_to_responder(monkeypatch):
     h._maybe_route_recommender_from_intent(
         staged=sp, message="what course should I take", store=_StubStore(),
     )
+    # voice_hint MUST be preserved regardless of cascade landing.
+    # The point of voice_hint is to carry the original user intent
+    # so the responder can branch voice even if the rendered layer
+    # is different (cascade fell through).
     assert captured["voice_hint"] == "training_recommendation"
-    assert captured["mode"] == "local_gap_coach"
+    # Mode is the LANDED mode after cascade. With these stubs Layer
+    # B is empty -> cascade falls to A (target_noc_standard).
+    assert captured["mode"] == "target_noc_standard"
 
 
 # ---------------------------------------------------------------------------
@@ -450,8 +464,10 @@ def test_target_role_text_set_but_noc_unresolved_resolves_before_substrate(
     assert resolved_called == ["accounting clerk"]
     # Resolution was persisted to staged.target_noc so downstream uses it.
     assert sp.target_noc == "14200"
-    # Substrate gate passed -> recommender_layer dispatched (not ask_substrate).
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Substrate gate passed -> recommender_layer dispatched. With
+    # _stub_engine_and_layer_a stubs, Layer B is empty -> cascade
+    # falls through to A (terminal) -> pending becomes None.
+    assert sp.pending_recommender_offer is None
 
 
 def test_resolver_failure_leaves_target_noc_none_falls_through(monkeypatch):
@@ -699,8 +715,10 @@ def test_deferred_intent_consumed_when_substrate_fills(monkeypatch):
         store=_StubStore(),
     )
     assert out is not None
-    # The deferred intent was used to route -- chain advanced.
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Deferred routed as local_skill_gap (Layer B). With stubs Layer
+    # B is empty -> cascade falls to A (terminal). Pending becomes
+    # None either way -- the consumption fired and the chain ran.
+    assert sp.pending_recommender_offer is None
     # And the flag was cleared.
     assert sp.deferred_career_intent is None
 
@@ -956,6 +974,322 @@ def test_out_of_scope_canned_does_not_set_last_asked_slots(monkeypatch):
 # ---------------------------------------------------------------------------
 # End-to-end: target-fill case the original tests missed
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Slice 2.5 (2026-06-23): chain order locked to B -> C -> A -> END + cascade
+# ---------------------------------------------------------------------------
+def test_recommender_next_mode_chain_is_B_to_C_to_A():
+    """Chain dict must match the locked peer-engine design:
+    B -> C -> A -> END. The pre-2.5 dict had B -> A -> C -> END
+    from the original chain design that the peer-engine memo
+    superseded."""
+    assert h._RECOMMENDER_NEXT_MODE == {
+        "local_gap_coach":       "adjacent_noc_standard",
+        "adjacent_noc_standard": "target_noc_standard",
+        "target_noc_standard":   None,
+    }
+
+
+def test_layer_priority_cascade_starts_from_requested_mode():
+    """Each entry in _LAYER_PRIORITY_CASCADE starts with the
+    requested mode itself, then walks down the B -> C -> A order."""
+    assert h._LAYER_PRIORITY_CASCADE == {
+        "local_gap_coach":       ("local_gap_coach", "adjacent_noc_standard", "target_noc_standard"),
+        "adjacent_noc_standard": ("adjacent_noc_standard", "target_noc_standard"),
+        "target_noc_standard":   ("target_noc_standard",),
+    }
+
+
+def test_no_recommendation_canned_text_present():
+    assert h._NO_RECOMMENDATION_CANNED
+    assert isinstance(h._NO_RECOMMENDATION_CANNED, str)
+
+
+def test_layer_b_fallback_closes_with_layer_c_offer():
+    """Layer B's fallback should now close with the related-career-paths
+    offer (B -> C in the new chain), NOT the Canadian-standard offer
+    (which was B -> A in the old chain)."""
+    from skillbridge.chat import recommender_fallback as rf
+    assert "related career paths" in rf._CLOSE_LOCAL_GAP_COACH
+    assert "Canadian/NOC standard" not in rf._CLOSE_LOCAL_GAP_COACH
+
+
+def test_layer_c_fallback_closes_with_layer_a_offer():
+    """Layer C's fallback should now close with the Canadian-standard
+    offer (C -> A in the new chain)."""
+    from skillbridge.chat import recommender_fallback as rf
+    assert "Canadian/NOC standard" in rf._CLOSE_ADJACENT_NOC_STANDARD
+
+
+def test_recommender_prompt_layer_b_section_offers_layer_c():
+    """The RECOMMENDER_RESPONDER_PROMPT's local_gap_coach mode
+    section must require the layer C offer ('related career paths')
+    as its verbatim close."""
+    from skillbridge.chat.prompts import RECOMMENDER_RESPONDER_PROMPT
+    # Find the local_gap_coach mode section
+    body = RECOMMENDER_RESPONDER_PROMPT
+    # Slice the first mode section
+    start = body.index("MODE = local_gap_coach")
+    end = body.index("MODE = adjacent_noc_standard", start)
+    section = body[start:end]
+    assert "related career paths" in section
+    assert "Canadian/NOC standard" not in section
+
+
+def test_recommender_prompt_layer_c_section_offers_layer_a():
+    from skillbridge.chat.prompts import RECOMMENDER_RESPONDER_PROMPT
+    body = RECOMMENDER_RESPONDER_PROMPT
+    start = body.index("MODE = adjacent_noc_standard")
+    end = body.index("MODE = target_noc_standard", start)
+    section = body[start:end]
+    assert "Canadian/NOC standard" in section
+
+
+def test_recommender_prompt_layer_a_section_is_terminal():
+    """Layer A is now the chain terminal. Its mode section must say
+    'ENDS HERE' and not propose another mode."""
+    from skillbridge.chat.prompts import RECOMMENDER_RESPONDER_PROMPT
+    body = RECOMMENDER_RESPONDER_PROMPT
+    # Use the second occurrence of "MODE = target_noc_standard"
+    # (the second prompt-section block, not the first one in the
+    # CRITICAL HARD RULE list).
+    first = body.index("MODE = target_noc_standard")
+    second = body.index("MODE = target_noc_standard", first + 1)
+    # Section runs from the second occurrence to either the next
+    # major section or the end of the prompt body.
+    section = body[second:]
+    # End the section at the next "## When MODE" header if present,
+    # else use whole tail.
+    next_section = section.find("## When MODE")
+    if next_section != -1 and next_section > 0:
+        section = section[:next_section]
+    # Terminal indicator + natural follow-up close present.
+    assert "ENDS HERE" in section
+    # The "Want to dig into" phrase appears verbatim (line-wrap in
+    # source means newline can separate parts; normalize whitespace).
+    normalized = " ".join(section.split())
+    assert "Want to dig into one of these" in normalized
+
+
+# ---------------------------------------------------------------------------
+# Cascade behavior tests
+# ---------------------------------------------------------------------------
+def test_cascade_B_with_content_uses_B_no_fallback(monkeypatch):
+    """When Layer B has content, the cascade stops at B. No log
+    of cascade falling through."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "local_skill_gap",
+    )
+    _stub_engine_and_layer_a(monkeypatch)
+    # Override CP4 to return a primary that DOES match a Layer B
+    # record so Layer B has content.
+    monkeypatch.setattr(
+        "skillbridge.chat.development_plan.compute_primary_gap_name",
+        lambda **kwargs: "QuickBooks Desktop",
+    )
+    # Provide a match with that gap
+    class _M:
+        job_id = "j1"
+        title = "Bookkeeper"
+        employer = "Acme"
+        missing_skills = ["QuickBooks Desktop"]
+        missing_skill_ids = [None]
+        noc_code = "13110"  # same minor group as target 13110
+
+    monkeypatch.setattr(
+        "skillbridge.match.engine.compute_matches_in_memory",
+        lambda staged, top=5: [_M()],
+    )
+    sp = _make_staged()
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="what should I improve?", store=_StubStore(),
+    )
+    assert out is not None
+    # Pending should be the LANDED mode's next: B -> C
+    assert sp.pending_recommender_offer == "adjacent_noc_standard"
+
+
+def test_cascade_B_empty_falls_to_C_when_C_has_content(monkeypatch, caplog):
+    """When Layer B returns empty evidence, the cascade falls to C.
+    If C has content, C dispatches and pending advances to C's
+    next-mode (target_noc_standard)."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "local_skill_gap",
+    )
+    _stub_engine_and_layer_a(monkeypatch)
+    # Layer B empty: CP4 returns None.
+    monkeypatch.setattr(
+        "skillbridge.chat.development_plan.compute_primary_gap_name",
+        lambda **kwargs: None,
+    )
+    sp = _make_staged()
+    sp.last_adjacent_nocs = ("13100",)  # gives Layer C content
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="what should I improve?", store=_StubStore(),
+    )
+    assert out is not None
+    # Landed on C, so pending advances to C's next (A).
+    assert sp.pending_recommender_offer == "target_noc_standard"
+
+
+def test_cascade_B_and_C_empty_falls_to_A_when_A_has_content(monkeypatch):
+    """When B and C are both empty, the cascade falls to A. A is
+    the chain terminal -> pending becomes None."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "local_skill_gap",
+    )
+    # Layer A returns content.
+    monkeypatch.setattr(
+        "skillbridge.chat.gap_evidence._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.01", "skill_name": "Reading Comprehension",
+             "importance": 4.5, "noc_title": "Administrative assistant"},
+        ],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.compute_matches_in_memory",
+        lambda staged, top=5: [],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.build_user_skill_rows",
+        lambda skills: [],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.derive_user_skill_sets",
+        lambda rows: (set(), set(), set()),
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.development_plan.compute_primary_gap_name",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.responder.is_enabled", lambda: False,
+    )
+    sp = _make_staged()
+    sp.last_adjacent_nocs = ()  # Layer C empty
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="what should I improve?", store=_StubStore(),
+    )
+    assert out is not None
+    # Landed on A (terminal) -> pending becomes None.
+    assert sp.pending_recommender_offer is None
+
+
+def test_cascade_all_empty_emits_no_recommendation_canned(monkeypatch):
+    """When all three layers in the cascade are empty, the
+    dispatcher emits the _NO_RECOMMENDATION_CANNED text."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "local_skill_gap",
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.compute_matches_in_memory",
+        lambda staged, top=5: [],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.build_user_skill_rows",
+        lambda skills: [],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.derive_user_skill_sets",
+        lambda rows: (set(), set(), set()),
+    )
+    # Layer A returns NOTHING.
+    monkeypatch.setattr(
+        "skillbridge.chat.gap_evidence._fetch_noc_skill_rows",
+        lambda noc: [],
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.development_plan.compute_primary_gap_name",
+        lambda **kwargs: None,
+    )
+    sp = _make_staged()
+    sp.last_adjacent_nocs = ()  # Layer C empty
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="what should I improve?", store=_StubStore(),
+    )
+    assert out is not None
+    assert out["reply"] == h._NO_RECOMMENDATION_CANNED
+    # No chain advance because nothing dispatched.
+    assert sp.pending_recommender_offer is None
+
+
+def test_cascade_requested_C_falls_to_A_only(monkeypatch):
+    """When career intent dispatches Layer C (e.g. user typed
+    'what else can I do?') and Layer C is empty, the cascade
+    falls to A only -- NOT back to B (priority is downward only)."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "career_exploration",
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.gap_evidence._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.01", "skill_name": "Reading Comprehension",
+             "importance": 4.5, "noc_title": "Administrative assistant"},
+        ],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.build_user_skill_rows",
+        lambda skills: [],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.derive_user_skill_sets",
+        lambda rows: (set(), set(), set()),
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.responder.is_enabled", lambda: False,
+    )
+    # We should NOT see B's engine calls -- C cascades to A only.
+    matches_called = {"n": 0}
+
+    def fake_engine(staged, top=5):
+        matches_called["n"] += 1
+        return []
+
+    monkeypatch.setattr(
+        "skillbridge.match.engine.compute_matches_in_memory", fake_engine,
+    )
+    sp = _make_staged()
+    sp.last_adjacent_nocs = ()  # Layer C empty
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="what else can I do?", store=_StubStore(),
+    )
+    assert out is not None
+    # Landed on A; B's engine call NEVER fires for requested-C path.
+    assert matches_called["n"] == 0
+
+
+def test_cascade_requested_A_no_fallback(monkeypatch):
+    """When career intent dispatches Layer A (e.g. user typed
+    'compare to NOC standard') and Layer A is empty, the cascade
+    has only A in its list -- no further fallback. Canned text emitted."""
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_intent.classify_career_intent",
+        lambda **kwargs: "noc_standard_comparison",
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.gap_evidence._fetch_noc_skill_rows",
+        lambda noc: [],  # Layer A empty
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.build_user_skill_rows",
+        lambda skills: [],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.derive_user_skill_sets",
+        lambda rows: (set(), set(), set()),
+    )
+    sp = _make_staged()
+    out = h._maybe_route_recommender_from_intent(
+        staged=sp, message="compare me to the standard", store=_StubStore(),
+    )
+    assert out is not None
+    assert out["reply"] == h._NO_RECOMMENDATION_CANNED
+
+
 def test_end_to_end_intent_deferred_then_consumed_on_target_fill(monkeypatch):
     """The full path the original implementation broke:
     1. User asks recommender question with no target -> deferred set + ask_target
@@ -1022,8 +1356,11 @@ def test_end_to_end_intent_deferred_then_consumed_on_target_fill(monkeypatch):
     )
     assert out2 is not None
     # Classifier returned unclear, bridge consumed deferred ->
-    # routed to local_skill_gap -> dispatched local_gap_coach.
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # routed to local_skill_gap. With stubs Layer B is empty,
+    # cascade falls to A (terminal) -> pending becomes None.
+    # The KEY assertions: deferred was consumed (not lost), AND
+    # SOMETHING dispatched (out2 is not None).
+    assert sp.pending_recommender_offer is None
     # Deferred was consumed.
     assert sp.deferred_career_intent is None
 
