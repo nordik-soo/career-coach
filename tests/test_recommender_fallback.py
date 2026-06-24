@@ -54,14 +54,15 @@ def _gap(layer, skill_id, skill_name, importance=None, blocker=False,
 
 
 def test_local_gap_coach_empty_evidence():
-    """Slice 2.5: Layer B's fallback now closes with the
-    related-career-paths offer (B -> C in the new chain)."""
+    """When CP4 returns None / Layer B is empty, the fallback honestly
+    says nothing surfaced as the top gap and still emits the locked
+    chain close to target_noc_standard."""
     rec = RecommenderEvidence(
         mode="local_gap_coach", evidence=(), training=(),
     )
     text = render_recommender_fallback(rec)
     assert "didn't surface" in text.lower() or "don't have" in text.lower()
-    assert "related career paths" in text  # B -> C locked chain close
+    assert "Canadian/NOC standard" in text  # locked chain close
 
 
 def test_local_gap_coach_with_evidence_and_no_training():
@@ -80,8 +81,8 @@ def test_local_gap_coach_with_evidence_and_no_training():
     text = render_recommender_fallback(rec)
     assert "bank reconciliation" in text
     assert "Sault Community Career Centre" in text
-    # Slice 2.5: B -> C chain close.
-    assert "related career paths" in text
+    # Locked chain close present.
+    assert "Canadian/NOC standard" in text
     # No invented provider names.
     assert "Sault College" not in text
     assert "https://" not in text  # no URL when no training
@@ -113,8 +114,7 @@ def test_local_gap_coach_with_evidence_and_matching_training():
     assert "Sault College" in text
     assert "Bookkeeping fundamentals course" in text
     assert "https://saultcollege.ca/bookkeeping" in text
-    # Slice 2.5: B -> C chain close.
-    assert "related career paths" in text
+    assert "Canadian/NOC standard" in text  # chain close
 
 
 def test_local_gap_coach_training_attached_by_skill_id_preferred():
@@ -169,22 +169,15 @@ def test_local_gap_coach_training_falls_back_to_name_when_skill_id_null():
 # target_noc_standard
 # ---------------------------------------------------------------------------
 def test_target_noc_standard_empty_evidence():
-    """Slice 2.5: Layer A is now the chain TERMINAL. Empty fallback
-    closes with a natural follow-up, NOT a chain offer to another
-    mode. (Body text may reference 'Canadian/NOC standard' as the
-    descriptive name of what's missing -- that's not a chain offer.)"""
+    """When the NOC has no OaSIS profile, fallback honestly says so and
+    still emits the locked chain close to adjacent_noc_standard."""
     rec = RecommenderEvidence(
         mode="target_noc_standard", evidence=(), training=(),
     )
     text = render_recommender_fallback(rec)
     assert "don't have" in text.lower() or "no" in text.lower()
     assert "standard skill profile" in text.lower()
-    # No chain-offer phrasings (the close-offer would say
-    # "Want me to ..." with one of the other modes).
-    assert "Want me to show how to prepare" not in text  # not B's offer
-    assert "Want me to compare your skills" not in text  # not C's offer
-    # Has a natural follow-up question.
-    assert "?" in text
+    assert "related career paths" in text  # locked chain close
 
 
 def test_target_noc_standard_single_skill():
@@ -209,9 +202,7 @@ def test_target_noc_standard_single_skill():
     assert "you're missing" not in body
     assert "you can't" not in body
     assert "is a gap" not in body
-    # Slice 2.5: Layer A is terminal -- no chain offer.
-    assert "related career paths" not in text
-    assert "dig into" in text.lower()  # natural follow-up
+    assert "related career paths" in text  # chain close
 
 
 def test_target_noc_standard_three_skills_with_oxford_comma():
@@ -237,9 +228,7 @@ def test_target_noc_standard_three_skills_with_oxford_comma():
     assert "Numeracy" in text
     assert ", and Numeracy" in text  # Oxford comma
     assert "emphasizes" in text.lower()
-    # Slice 2.5: Layer A is terminal -- natural follow-up, no chain.
-    assert "related career paths" not in text
-    assert "dig into" in text.lower()
+    assert "related career paths" in text  # chain close
 
 
 def test_target_noc_standard_no_forbidden_deficit_phrases():
@@ -268,16 +257,17 @@ def test_target_noc_standard_no_forbidden_deficit_phrases():
 # adjacent_noc_standard
 # ---------------------------------------------------------------------------
 def test_adjacent_noc_standard_empty_evidence():
-    """Slice 2.5: Layer C now offers Layer A in its chain close
-    (C -> A in the new chain). Empty fallback acknowledges
-    honestly, then offers the Canadian/NOC standard."""
+    """No adjacency surfaced -- fallback acknowledges honestly and
+    closes naturally (chain ENDS HERE)."""
     rec = RecommenderEvidence(
         mode="adjacent_noc_standard", evidence=(), training=(),
     )
     text = render_recommender_fallback(rec)
     assert "nothing surfaced" in text.lower()
-    # Slice 2.5: C -> A chain close.
-    assert "Canadian/NOC standard" in text
+    # Chain ENDS here -- no further mode offer.
+    assert "Canadian/NOC standard" not in text  # not chained
+    assert "related career paths" not in text  # not chained
+    # But a natural follow-up close.
     assert "?" in text
 
 
@@ -299,8 +289,8 @@ def test_adjacent_noc_standard_single_noc():
     assert "Coordinating" in text
     assert "If you wanted to move toward" in text  # exploratory voice
     assert "emphasizes" in text.lower()  # development-area voice
-    # Slice 2.5: C -> A chain close.
-    assert "Canadian/NOC standard" in text
+    # Chain ENDS here -- natural follow-up.
+    assert "dig into" in text.lower()
 
 
 def test_adjacent_noc_standard_multiple_nocs_grouped():
@@ -336,8 +326,8 @@ def test_adjacent_noc_standard_multiple_nocs_grouped():
     # NOC 13100's skill appears in its paragraph.
     biz_chunk = text[biz_idx:]
     assert "Coordinating" in biz_chunk
-    # Slice 2.5: C -> A chain close.
-    assert "Canadian/NOC standard" in text
+    # Chain ENDS here.
+    assert "dig into" in text.lower()
 
 
 def test_adjacent_noc_standard_no_forbidden_deficit_phrases():
@@ -360,9 +350,9 @@ def test_adjacent_noc_standard_no_forbidden_deficit_phrases():
         )
 
 
-def test_adjacent_noc_standard_chains_to_layer_a():
-    """Slice 2.5: Layer C now offers Layer A (Canadian/NOC standard)
-    as its chain close. Layer C is no longer terminal."""
+def test_adjacent_noc_standard_does_NOT_chain_to_another_mode():
+    """Chain ENDS at adjacent. The fallback must NOT include the
+    locked chain-close strings from earlier modes."""
     gaps = (
         _gap(layer="adjacent_noc_standard", skill_id="F.01.b.01",
              skill_name="Reading Comprehension", importance=4.5,
@@ -372,7 +362,5 @@ def test_adjacent_noc_standard_chains_to_layer_a():
         mode="adjacent_noc_standard", evidence=gaps, training=(),
     )
     text = render_recommender_fallback(rec)
-    # Slice 2.5: C -> A chain close.
-    assert "Canadian/NOC standard" in text
-    # No B -> A leak (B's old close).
+    assert "Canadian/NOC standard" not in text
     assert "related career paths" not in text

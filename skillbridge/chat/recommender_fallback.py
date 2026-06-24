@@ -47,17 +47,12 @@ if TYPE_CHECKING:
 
 
 # Locked verbatim chain closings (mirrors RECOMMENDER_RESPONDER_PROMPT).
-# Slice 2.5 (2026-06-23): chain reassigned to B -> C -> A -> END per
-# the locked peer-engine design. The two non-empty closings swapped
-# modes (no new strings invented).
 _CLOSE_LOCAL_GAP_COACH: str = (
-    # B -> C: offers Layer C (adjacent_noc_standard) next.
-    "Want me to show how to prepare for those related career paths?"
-)
-_CLOSE_ADJACENT_NOC_STANDARD: str = (
-    # C -> A: offers Layer A (target_noc_standard) next.
     "Want me to compare your skills with the Canadian/NOC standard "
     "for this occupation?"
+)
+_CLOSE_TARGET_NOC_STANDARD: str = (
+    "Want me to show how to prepare for those related career paths?"
 )
 
 
@@ -141,15 +136,13 @@ def _render_local_gap_coach(rec: "RecommenderEvidence") -> str:
 
 def _render_target_noc_standard(rec: "RecommenderEvidence") -> str:
     """Layer A response: name top development areas in development-area
-    voice. NEVER deficit voice. Slice 2.5: A is now the CHAIN TERMINAL
-    in the B -> C -> A -> END order, so the empty + populated paths
-    both close with a natural follow-up question (no further mode
-    offer)."""
+    voice. NEVER deficit voice. End with the locked chain close to
+    adjacent_noc_standard."""
     if not rec.evidence:
         return (
             "I don't have a Canadian/NOC standard skill profile loaded "
             "for that occupation yet. "
-            "Want to look at this from a different angle?"
+            + _CLOSE_TARGET_NOC_STANDARD
         )
 
     # The wrapper arrives already capped at top-3 by importance.
@@ -169,18 +162,18 @@ def _render_target_noc_standard(rec: "RecommenderEvidence") -> str:
         "occupation; you can strengthen and demonstrate them in how you "
         "describe your work. "
     )
-    # Slice 2.5: A is terminal. Natural follow-up, no further offer.
-    return body + "Anything in there you want to dig into?"
+    return body + _CLOSE_TARGET_NOC_STANDARD
 
 
 def _render_adjacent_noc_standard(rec: "RecommenderEvidence") -> str:
     """Layer C response: per-NOC paragraph, development-area voice,
-    exploratory framing. Slice 2.5: C now offers Layer A (NOC standard)
-    as its chain follow-up per the B -> C -> A order."""
+    exploratory framing. Chain ENDS HERE -- no further mode offer,
+    just a natural follow-up question."""
     if not rec.evidence:
         return (
             "Nothing surfaced from adjacent roles in this session. "
-            + _CLOSE_ADJACENT_NOC_STANDARD
+            "Want to dig into anything specific from those original "
+            "matches?"
         )
 
     # Group records by (source_id, source_label) preserving first-seen
@@ -214,8 +207,8 @@ def _render_adjacent_noc_standard(rec: "RecommenderEvidence") -> str:
         )
 
     body = " ".join(paragraphs)
-    # Slice 2.5: C -> A chain offer.
-    return body + " " + _CLOSE_ADJACENT_NOC_STANDARD
+    # Chain ENDS here -- natural follow-up only.
+    return body + " Want to dig into one of these in particular?"
 
 
 def _training_matches_gap(

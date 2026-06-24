@@ -538,28 +538,10 @@ _VALID_RECOMMENDER_MODES: frozenset[str] = frozenset({
 
 # Locked next-mode mapping: each mode advances the chain. None means
 # the chain ENDS HERE (adjacent_noc_standard is terminal).
-# Slice 2.5 (2026-06-23): chain mode order flipped to match the
-# locked peer-engine design B -> C -> A. Previously B -> A -> C ->
-# END because the original chain prompt/fallback closings
-# accidentally encoded the old design. Slice 2.5 reassigns the
-# closing strings between modes (no new text invented) so the chain
-# state and the prompt agree.
 _RECOMMENDER_NEXT_MODE: dict[str, str | None] = {
-    "local_gap_coach":         "adjacent_noc_standard",  # B -> C
-    "adjacent_noc_standard":   "target_noc_standard",    # C -> A
-    "target_noc_standard":     None,                     # A -> END
-}
-
-
-# Slice 2.5 (2026-06-23): when the requested lead mode's evidence is
-# empty, fall back to the next priority layer per locked B -> C -> A
-# rule. Cascade order starts FROM the requested mode and steps down
-# the B -> C -> A priority list. If all layers in the cascade are
-# empty, the dispatcher emits the _NO_RECOMMENDATION_CANNED text.
-_LAYER_PRIORITY_CASCADE: dict[str, tuple[str, ...]] = {
-    "local_gap_coach":       ("local_gap_coach", "adjacent_noc_standard", "target_noc_standard"),
-    "adjacent_noc_standard": ("adjacent_noc_standard", "target_noc_standard"),
-    "target_noc_standard":   ("target_noc_standard",),
+    "local_gap_coach": "target_noc_standard",
+    "target_noc_standard": "adjacent_noc_standard",
+    "adjacent_noc_standard": None,
 }
 
 
@@ -799,18 +781,6 @@ _OUT_OF_SCOPE_CANNED: str = (
     "a target role?"
 )
 
-# Slice 2.5 (2026-06-23): emitted when ALL three recommender layers
-# return empty for the user's current substrate. Rare in practice
-# (requires no SSM postings for the target NOC family AND no adjacent
-# NOCs cached AND no OaSIS profile for the target). Placeholder
-# wording; refined in slice 3 (response shape).
-_NO_RECOMMENDATION_CANNED: str = (
-    "I couldn't surface a specific recommendation for that target "
-    "right now -- not enough local posting data or standard profile "
-    "to anchor the advice. Want me to look at what jobs are open in "
-    "this field, or try a different occupation?"
-)
-
 
 def _dispatch_recommender_from_intent(
     *,
@@ -847,7 +817,6 @@ def _dispatch_recommender_from_intent(
         build_recommender_evidence_adjacent_noc_standard,
         build_recommender_evidence_local_gap_coach,
         build_recommender_evidence_target_noc_standard,
-        filter_matches_to_target_family,
     )
     from skillbridge.chat.development_plan import compute_primary_gap_name
     from skillbridge.match.engine import (
@@ -859,39 +828,20 @@ def _dispatch_recommender_from_intent(
     user_rows = build_user_skill_rows(staged.skills)
     user_skill_ids, _names, _canon = derive_user_skill_sets(user_rows)
 
-    # Slice 2.5 (2026-06-23): cache engine output + registry across
-    # cascade iterations so we don't re-run them when falling from
-    # B -> C -> A. Lazy-init keyed on mode.
-    _engine_cache: dict[str, Any] = {}
-
-    def _build_for_mode(try_mode: str) -> "RecommenderEvidence | None":
-        """Build evidence for one specific mode. Returns the wrapper
-        or None on error. Called once per mode in the cascade; engine
-        / registry side-effects are cached across calls."""
-        if try_mode == "local_gap_coach":
-            if "matches" not in _engine_cache:
-                raw = compute_matches_in_memory(staged, top=5)
-                filtered = filter_matches_to_target_family(
-                    raw, staged.target_noc,
-                )
-                log.info(
-                    "recommender_intent_dispatch session=%s "
-                    "layer_b_filter raw=%d filtered=%d target_noc=%s",
-                    staged.session_id[:8],
-                    len(raw), len(filtered), staged.target_noc,
-                )
-                _engine_cache["matches"] = filtered
-            filtered_matches = _engine_cache["matches"]
+    rec_evidence: RecommenderEvidence | None = None
+    try:
+        if mode == "local_gap_coach":
+            in_memory_matches = compute_matches_in_memory(staged, top=5)
             primary = compute_primary_gap_name(
                 staged=staged,
                 user_message=user_message,
                 truth_enough_to_match=True,
                 truth_usable_evidence_present=True,
                 engine_completed=True,
-                in_memory_matches=filtered_matches,
+                in_memory_matches=in_memory_matches,
                 skill_adjacent_results=None,
                 snapshot_usable=True,
-                target_posting_count=len(filtered_matches),
+                target_posting_count=len(in_memory_matches),
             )
             registry = None
             if TRAINING_REGISTRY_ENABLED:
@@ -904,43 +854,30 @@ def _dispatch_recommender_from_intent(
                         "training will be empty"
                     )
                     registry = None
-            return build_recommender_evidence_local_gap_coach(
-                match_results=filtered_matches,
+            rec_evidence = build_recommender_evidence_local_gap_coach(
+                match_results=in_memory_matches,
                 primary_gap_name=primary,
                 registry=registry,
                 today=date.today(),
             )
-        if try_mode == "adjacent_noc_standard":
-            # Known limitation: Layer C uses staged.last_adjacent_nocs
-            # which is only populated by a prior matching turn. Cold
-            # intent entry yields empty -> cascade falls to A.
-            # Wiring the full adjacency engine here is a follow-up
-            # slice per memo section 4.
-            return build_recommender_evidence_adjacent_noc_standard(
-                user_skill_ids=user_skill_ids,
-                last_adjacent_nocs=staged.last_adjacent_nocs,
-            )
-        if try_mode == "target_noc_standard":
-            return build_recommender_evidence_target_noc_standard(
+        elif mode == "target_noc_standard":
+            rec_evidence = build_recommender_evidence_target_noc_standard(
                 user_skill_ids=user_skill_ids,
                 target_noc=staged.target_noc,
             )
-        return None
-
-    # Slice 2.5: cascade through the B -> C -> A priority list
-    # starting from the requested mode. Use the first layer whose
-    # evidence is non-empty; if all are empty, emit the
-    # _NO_RECOMMENDATION_CANNED text.
-    cascade = _LAYER_PRIORITY_CASCADE.get(mode, (mode,))
-    rec_evidence: RecommenderEvidence | None = None
-    landed_mode = mode
-    try:
-        for try_mode in cascade:
-            candidate = _build_for_mode(try_mode)
-            if candidate is not None and candidate.evidence:
-                rec_evidence = candidate
-                landed_mode = try_mode
-                break
+        elif mode == "adjacent_noc_standard":
+            # Known limitation in this slice: Layer C requires
+            # `last_adjacent_nocs` to be populated by a prior matching
+            # turn (the SET site that captured sideways_move adjacent
+            # NOCs). For intent-driven cold entry without that prior
+            # turn, the wrapper returns empty and the fallback renders
+            # honestly. Wiring full internal matching invocation
+            # (engine + adjacency pipeline) into this dispatcher is a
+            # follow-up slice per memo section 4.
+            rec_evidence = build_recommender_evidence_adjacent_noc_standard(
+                user_skill_ids=user_skill_ids,
+                last_adjacent_nocs=staged.last_adjacent_nocs,
+            )
     except Exception:  # noqa: BLE001
         log.exception(
             "recommender_intent_dispatch evidence_build_failed mode=%s",
@@ -949,34 +886,14 @@ def _dispatch_recommender_from_intent(
         return None
 
     if rec_evidence is None:
-        # All layers in the cascade are empty. Render the canned
-        # honest no-recommendation text. Do NOT advance the chain --
-        # there's nothing to chain to.
-        log.info(
-            "recommender_intent_dispatch session=%s "
-            "layer_cascade requested=%s landed=empty",
-            staged.session_id[:8], mode,
-        )
-        return _emit_canned_response(
-            staged=staged, store=store,
-            reply=_NO_RECOMMENDATION_CANNED,
-            resume_info=resume_info,
-            asked_slot=None,
-        )
-
-    if landed_mode != mode:
-        log.info(
-            "recommender_intent_dispatch session=%s "
-            "layer_cascade requested=%s landed=%s",
-            staged.session_id[:8], mode, landed_mode,
-        )
+        return None
 
     # Synthesize a passthrough ArbiterDecision; compose_response_v2's
     # recommender early-return ignores `decision` so this value is
     # never consulted downstream. Required by the dataclass shape.
     synth = ArbiterDecision(
         final_move="present_tiered_matches",
-        reason_code="recommender_intent_dispatch:" + landed_mode,
+        reason_code="recommender_intent_dispatch:" + mode,
         tone="neutral",
         arbiter_action="recommender",
         ask_slot=None,
@@ -996,11 +913,10 @@ def _dispatch_recommender_from_intent(
     )
     reply = compose_response_v2(inp)
 
-    # Slice 2.5: chain advance uses LANDED mode, not requested mode.
-    # If cascade fell B -> C, pending should reflect C's next-mode
-    # (target_noc_standard), not B's next-mode -- otherwise the
-    # closing prompt text and the pending state would disagree.
-    next_mode = _RECOMMENDER_NEXT_MODE.get(landed_mode)
+    # Option A (locked): set the next chain mode so the prompt's
+    # closing offer is not dead. Uses the existing chain dict; this
+    # slice does NOT change it.
+    next_mode = _RECOMMENDER_NEXT_MODE.get(mode)
     staged.pending_recommender_offer = next_mode
     if next_mode is None:
         staged.last_adjacent_nocs = ()
