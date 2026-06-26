@@ -427,3 +427,125 @@ def test_layer_c_includes_noc_label(monkeypatch):
     )
     assert len(rec.evidence) == 1
     assert rec.evidence[0].source_label == "Admin assistant"
+
+
+# ===========================================================================
+# Slice 2 (re-introduced 2026-06-23): Layer B target-NOC family filter
+# ===========================================================================
+from skillbridge.chat.recommender_assembly import filter_matches_to_target_family
+
+
+@dataclass
+class _MockMatch:
+    """Minimal MatchResult-like object with just noc_code."""
+    noc_code: str | None
+    job_id: str = "job-x"
+
+
+def test_filter_returns_all_when_target_noc_none():
+    """No target -> no anchor -> return all matches unchanged."""
+    matches = [
+        _MockMatch(noc_code="14200"),
+        _MockMatch(noc_code="13110"),
+        _MockMatch(noc_code="14404"),
+    ]
+    out = filter_matches_to_target_family(matches, None)
+    assert len(out) == 3
+
+
+@pytest.mark.parametrize("bad_target", [
+    "", "  ", "13", "13110abc", "ABC12", "131100",
+])
+def test_filter_returns_all_when_target_noc_invalid(bad_target):
+    """Malformed target NOC -> no filter (preserves current behavior)."""
+    matches = [
+        _MockMatch(noc_code="14200"),
+        _MockMatch(noc_code="13110"),
+    ]
+    out = filter_matches_to_target_family(matches, bad_target)
+    assert len(out) == 2
+
+
+def test_filter_returns_exact_noc_match_only():
+    """When postings include the exact target NOC, return ONLY those.
+    Don't dilute with minor-group / off-target postings."""
+    matches = [
+        _MockMatch(noc_code="14200"),
+        _MockMatch(noc_code="13110"),
+        _MockMatch(noc_code="14200"),  # second exact match
+        _MockMatch(noc_code="14404"),
+    ]
+    out = filter_matches_to_target_family(matches, "14200")
+    assert len(out) == 2
+    assert all(m.noc_code == "14200" for m in out)
+
+
+def test_filter_falls_back_to_minor_group_when_no_exact():
+    """When no exact NOC match exists, return same-minor-group
+    postings (first 4 digits match)."""
+    matches = [
+        _MockMatch(noc_code="14201"),  # same minor group as 14200
+        _MockMatch(noc_code="14202"),  # same minor group
+        _MockMatch(noc_code="13110"),  # different minor group
+        _MockMatch(noc_code="14404"),  # different minor group
+    ]
+    out = filter_matches_to_target_family(matches, "14200")
+    assert len(out) == 2
+    assert all(m.noc_code in ("14201", "14202") for m in out)
+
+
+def test_filter_returns_empty_when_no_exact_and_no_minor_group():
+    """If neither exact nor minor-group match exists, return empty."""
+    matches = [
+        _MockMatch(noc_code="13110"),
+        _MockMatch(noc_code="14404"),
+        _MockMatch(noc_code="62024"),
+    ]
+    out = filter_matches_to_target_family(matches, "14200")
+    assert out == []
+
+
+def test_filter_skips_matches_with_no_noc_code():
+    matches = [
+        _MockMatch(noc_code=None),
+        _MockMatch(noc_code="14200"),
+        _MockMatch(noc_code=None),
+    ]
+    out = filter_matches_to_target_family(matches, "14200")
+    assert len(out) == 1
+    assert out[0].noc_code == "14200"
+
+
+def test_filter_skips_matches_with_invalid_noc_code_length():
+    matches = [
+        _MockMatch(noc_code="1420"),  # too short
+        _MockMatch(noc_code="142001"),  # too long
+        _MockMatch(noc_code="14201"),  # valid same-minor
+    ]
+    out = filter_matches_to_target_family(matches, "14200")
+    assert len(out) == 1
+    assert out[0].noc_code == "14201"
+
+
+def test_filter_empty_match_list():
+    out = filter_matches_to_target_family([], "14200")
+    assert out == []
+
+
+def test_filter_accepts_any_iterable():
+    matches_tuple = (
+        _MockMatch(noc_code="14200"),
+        _MockMatch(noc_code="13110"),
+    )
+    out = filter_matches_to_target_family(matches_tuple, "14200")
+    assert len(out) == 1
+
+
+def test_filter_preserves_match_order():
+    matches = [
+        _MockMatch(noc_code="14200", job_id="a"),
+        _MockMatch(noc_code="14201", job_id="b"),
+        _MockMatch(noc_code="14200", job_id="c"),
+    ]
+    out = filter_matches_to_target_family(matches, "14200")
+    assert [m.job_id for m in out] == ["a", "c"]

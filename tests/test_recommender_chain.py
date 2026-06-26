@@ -78,10 +78,13 @@ def test_valid_modes_are_locked_set():
     })
 
 
-def test_chain_advances_through_the_three_modes_and_ends():
-    assert _RECOMMENDER_NEXT_MODE["local_gap_coach"] == "target_noc_standard"
-    assert _RECOMMENDER_NEXT_MODE["target_noc_standard"] == "adjacent_noc_standard"
+def test_chain_advances_b_to_c_and_ends():
+    """Slice 2 (locked 2026-06-23): B -> C (offer related career
+    paths). C -> END (natural follow-up, no chain to A). A -> END
+    (A is intent-only, never reached via chain)."""
+    assert _RECOMMENDER_NEXT_MODE["local_gap_coach"] == "adjacent_noc_standard"
     assert _RECOMMENDER_NEXT_MODE["adjacent_noc_standard"] is None
+    assert _RECOMMENDER_NEXT_MODE["target_noc_standard"] is None
 
 
 # ===========================================================================
@@ -214,11 +217,10 @@ def test_dispatch_no_at_adjacent_mode_clears_flag():
 # ===========================================================================
 # Consent = "yes" -> chain advance
 # ===========================================================================
-def test_yes_at_target_mode_advances_to_adjacent(monkeypatch):
-    """When the user yes-consents at target_noc_standard, the chain
-    advances to adjacent_noc_standard, last_adjacent_nocs is preserved
-    (the chain is not yet ended), and the responder dispatch is
-    invoked."""
+def test_yes_at_target_mode_ends_chain(monkeypatch):
+    """Slice 2: when user yes-consents at target_noc_standard (Layer A),
+    the chain ENDS HERE -- A is intent-only and has no chain successor.
+    Pending is cleared and last_adjacent_nocs is cleared too."""
     sp = _make_staged(
         pending="target_noc_standard",
         last_adjacent_nocs=("13110", "13100"),
@@ -242,9 +244,10 @@ def test_yes_at_target_mode_advances_to_adjacent(monkeypatch):
     )
     assert result is not None
     assert result["reply"]
-    assert sp.pending_recommender_offer == "adjacent_noc_standard"
-    # last_adjacent_nocs persists -- chain not yet ended.
-    assert sp.last_adjacent_nocs == ("13110", "13100")
+    # Slice 2: A is terminal -- chain ends here.
+    assert sp.pending_recommender_offer is None
+    # last_adjacent_nocs cleared at chain end.
+    assert sp.last_adjacent_nocs == ()
 
 
 def test_yes_at_adjacent_mode_ends_chain_and_clears_last_adjacent(monkeypatch):
@@ -274,18 +277,16 @@ def test_yes_at_adjacent_mode_ends_chain_and_clears_last_adjacent(monkeypatch):
     assert sp.last_adjacent_nocs == ()  # cache cleared
 
 
-def test_yes_at_local_gap_coach_advances_to_target(monkeypatch):
-    """When the user yes-consents at local_gap_coach (initial offer),
-    the chain advances to target_noc_standard. Engine + CP4 are
-    stubbed."""
+def test_yes_at_local_gap_coach_advances_to_adjacent(monkeypatch):
+    """Slice 2: when user yes-consents at local_gap_coach (Layer B),
+    the chain advances to adjacent_noc_standard (Layer C), NOT to A.
+    Engine + CP4 are stubbed. Filter is a no-op (empty matches)."""
     sp = _make_staged(
         pending="local_gap_coach",
         last_adjacent_nocs=("13110",),
     )
     store = _StubStore()
     # Stub engine + CP4 calls to skip the real pipeline.
-    from skillbridge.match.engine import MatchResult
-
     monkeypatch.setattr(
         "skillbridge.match.engine.compute_matches_in_memory",
         lambda staged, top=5: [],
@@ -301,9 +302,8 @@ def test_yes_at_local_gap_coach_advances_to_target(monkeypatch):
         staged=sp, user_message="yes", store=store, resume_info=None,
     )
     assert result is not None
-    # Chain advances even when evidence is empty (the fallback narrates
-    # honestly and the chain still moves forward).
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Slice 2 chain: B -> C (NOT B -> A).
+    assert sp.pending_recommender_offer == "adjacent_noc_standard"
     # last_adjacent_nocs preserved across the chain.
     assert sp.last_adjacent_nocs == ("13110",)
 

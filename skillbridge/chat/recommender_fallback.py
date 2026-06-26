@@ -46,19 +46,28 @@ if TYPE_CHECKING:
     )
 
 
-# Locked verbatim chain closings (mirrors RECOMMENDER_RESPONDER_PROMPT).
+# Slice 2 (locked 2026-06-23): chain closings reassigned for the
+# new chain B -> C -> END, A -> END (intent-only).
+#
+# Layer B closes by OFFERING related career paths (Layer C).
+# Layer C closes natural -- no chain to A (A is intent-only).
+# Layer A closes natural -- no chain in or out.
 _CLOSE_LOCAL_GAP_COACH: str = (
-    "Want me to compare your skills with the Canadian/NOC standard "
-    "for this occupation?"
+    "Want me to show what related career paths your skills line up "
+    "with?"
 )
-_CLOSE_TARGET_NOC_STANDARD: str = (
-    "Want me to show how to prepare for those related career paths?"
+_CLOSE_ADJACENT_NOC_STANDARD_NATURAL: str = (
+    "Want to dig into one of these in particular?"
+)
+_CLOSE_TARGET_NOC_STANDARD_NATURAL: str = (
+    "Anything in there you want to dig into?"
 )
 
 
 def render_recommender_fallback(
     rec_evidence: "RecommenderEvidence | None",
     mode: "str | None" = None,
+    target_role_text: str | None = None,
 ) -> str:
     """Render a deterministic recommender response from the
     RecommenderEvidence wrapper. Returns coach-voice text.
@@ -69,6 +78,11 @@ def render_recommender_fallback(
             a minimal safe response with no chain close.
         mode: optional explicit mode override (for tests). When
             None, taken from rec_evidence.mode.
+        target_role_text: user's stated role text. Used by Layer A
+            to refer to the role the way the user phrased it,
+            rather than as the OaSIS source_label which can differ
+            (e.g. user says "accounting clerk" while OaSIS source
+            label is "Cost clerk"). Slice 2 grounding fix.
 
     Returns:
         Plain-text response. No URLs are invented; only TrainingResource
@@ -85,7 +99,7 @@ def render_recommender_fallback(
     if active_mode == "local_gap_coach":
         return _render_local_gap_coach(rec_evidence)
     if active_mode == "target_noc_standard":
-        return _render_target_noc_standard(rec_evidence)
+        return _render_target_noc_standard(rec_evidence, target_role_text)
     if active_mode == "adjacent_noc_standard":
         return _render_adjacent_noc_standard(rec_evidence)
     # Unknown mode -- defensive (shouldn't happen given the Literal).
@@ -98,8 +112,12 @@ def render_recommender_fallback(
 def _render_local_gap_coach(rec: "RecommenderEvidence") -> str:
     """Layer B response: name the top gap, attach training if
     available, fall back to SCCC referral if not. End with the
-    locked chain close to target_noc_standard."""
+    slice-2 chain close to adjacent_noc_standard (offer C)."""
     if not rec.evidence:
+        # Slice 2: this branch is reached ONLY from non-empty Layer B
+        # in the new dispatch (the empty paths are handled by canned
+        # texts in handler.py before the responder is invoked). Kept
+        # for defense / direct fallback callers.
         return (
             "I looked at the gaps for those postings but didn't surface "
             "a single top development area to focus on right now -- "
@@ -134,15 +152,26 @@ def _render_local_gap_coach(rec: "RecommenderEvidence") -> str:
     return body + _CLOSE_LOCAL_GAP_COACH
 
 
-def _render_target_noc_standard(rec: "RecommenderEvidence") -> str:
+def _render_target_noc_standard(
+    rec: "RecommenderEvidence",
+    target_role_text: str | None = None,
+) -> str:
     """Layer A response: name top development areas in development-area
-    voice. NEVER deficit voice. End with the locked chain close to
-    adjacent_noc_standard."""
+    voice. NEVER deficit voice. Closes natural (no chain).
+
+    Slice 2 grounding fix: when target_role_text is supplied, the
+    response uses it verbatim instead of "this occupation" so the
+    LLM/user-facing surface matches the user's stated role text
+    (e.g. "accounting clerk" instead of OaSIS source_label
+    "Cost clerk").
+    """
+    role_phrase = (target_role_text or "").strip() or "this occupation"
+
     if not rec.evidence:
         return (
-            "I don't have a Canadian/NOC standard skill profile loaded "
-            "for that occupation yet. "
-            + _CLOSE_TARGET_NOC_STANDARD
+            f"I don't have a Canadian/NOC standard skill profile loaded "
+            f"for {role_phrase} yet. "
+            + _CLOSE_TARGET_NOC_STANDARD_NATURAL
         )
 
     # The wrapper arrives already capped at top-3 by importance.
@@ -157,12 +186,12 @@ def _render_target_noc_standard(rec: "RecommenderEvidence") -> str:
         )
 
     body = (
-        f"The Canadian/NOC standard for this occupation emphasizes "
+        f"The Canadian/NOC standard for {role_phrase} emphasizes "
         f"{names_phrase}. These are standard development areas for the "
         "occupation; you can strengthen and demonstrate them in how you "
         "describe your work. "
     )
-    return body + _CLOSE_TARGET_NOC_STANDARD
+    return body + _CLOSE_TARGET_NOC_STANDARD_NATURAL
 
 
 def _render_adjacent_noc_standard(rec: "RecommenderEvidence") -> str:

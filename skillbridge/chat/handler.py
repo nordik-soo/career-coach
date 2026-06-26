@@ -538,10 +538,14 @@ _VALID_RECOMMENDER_MODES: frozenset[str] = frozenset({
 
 # Locked next-mode mapping: each mode advances the chain. None means
 # the chain ENDS HERE (adjacent_noc_standard is terminal).
+# Slice 2 (locked 2026-06-23): chain reassigned per peer-engine
+# locked design. B -> C (offer related career paths after Layer B).
+# C -> END (Layer C terminal natural follow-up). A -> END (A is
+# intent-only, never reached via chain).
 _RECOMMENDER_NEXT_MODE: dict[str, str | None] = {
-    "local_gap_coach": "target_noc_standard",
-    "target_noc_standard": "adjacent_noc_standard",
-    "adjacent_noc_standard": None,
+    "local_gap_coach":       "adjacent_noc_standard",  # B -> offer C
+    "adjacent_noc_standard": None,                     # C -> END
+    "target_noc_standard":   None,                     # A -> END (no chain in)
 }
 
 
@@ -637,6 +641,7 @@ def _dispatch_recommender_consume(
         build_recommender_evidence_adjacent_noc_standard,
         build_recommender_evidence_local_gap_coach,
         build_recommender_evidence_target_noc_standard,
+        filter_matches_to_target_family,
     )
     from skillbridge.chat.development_plan import compute_primary_gap_name
     from skillbridge.match.engine import (
@@ -651,17 +656,24 @@ def _dispatch_recommender_consume(
     rec_evidence: RecommenderEvidence | None = None
     try:
         if mode == "local_gap_coach":
+            # Slice 2: target-NOC family filter BEFORE CP4. Engine's
+            # top-5 by skill overlap can include off-target NOCs; CP4
+            # would then pick a primary gap from an off-target posting.
+            # Filter anchors Layer B on target NOC postings only.
             in_memory_matches = compute_matches_in_memory(staged, top=5)
+            filtered_matches = filter_matches_to_target_family(
+                in_memory_matches, staged.target_noc,
+            )
             primary = compute_primary_gap_name(
                 staged=staged,
                 user_message=user_message,
                 truth_enough_to_match=True,
                 truth_usable_evidence_present=True,
                 engine_completed=True,
-                in_memory_matches=in_memory_matches,
+                in_memory_matches=filtered_matches,
                 skill_adjacent_results=None,
                 snapshot_usable=True,
-                target_posting_count=len(in_memory_matches),
+                target_posting_count=len(filtered_matches),
             )
             registry = None
             if TRAINING_REGISTRY_ENABLED:
@@ -675,7 +687,7 @@ def _dispatch_recommender_consume(
                     )
                     registry = None
             rec_evidence = build_recommender_evidence_local_gap_coach(
-                match_results=in_memory_matches,
+                match_results=filtered_matches,
                 primary_gap_name=primary,
                 registry=registry,
                 today=date.today(),
@@ -782,6 +794,56 @@ _OUT_OF_SCOPE_CANNED: str = (
 )
 
 
+# Slice 2 (locked 2026-06-23): canned texts for the three Layer B
+# branches and the Layer C/A direct-intent empty paths. All four
+# substitute {target_role} from staged.target_role_text (fallback
+# "that role" when None).
+#
+# Strict resume gate (Option A locked): when Layer B is empty AND
+# no resume is uploaded, we ask SPECIFICALLY for the resume. No
+# "or work history" alternative -- a resume is the only profile
+# input that unlocks "OK, Layer B is honestly empty, offer Layer C."
+# Reason: chat-typed work history can't be parsed into the same
+# fact shape as resume_facts; if we accept it as equivalent we'd
+# either over-promise (offer C without the same evidence floor) or
+# silently keep asking for resume (confusing UX).
+_ASK_RESUME_FOR_LAYER_B: str = (
+    "I checked local {target_role} postings in Sault Ste. Marie, but "
+    "to give you useful gap advice I need a fuller picture of your "
+    "background. Could you upload your resume? With it I can give "
+    "you targeted advice for local openings."
+)
+
+_OFFER_C_AFTER_EMPTY_B: str = (
+    "I checked local {target_role} postings in Sault Ste. Marie but "
+    "didn't find specific gaps to coach you on against your current "
+    "profile. Want me to look at related career paths your skills "
+    "line up with?"
+)
+
+_LAYER_C_EMPTY_HONEST: str = (
+    "Nothing surfaced from related roles in this session. Want to "
+    "try a different target, or check what jobs are open in this "
+    "field?"
+)
+
+_LAYER_A_EMPTY_HONEST: str = (
+    "I don't have a Canadian/NOC standard skill profile loaded for "
+    "{target_role} yet. Want to look at this from a different angle?"
+)
+
+
+def _format_canned_with_target(template: str, target_role_text: str | None) -> str:
+    """Substitute {target_role} into a canned-text template.
+
+    Falls back to "that role" when staged.target_role_text is None
+    or empty. Keeps single source of truth for the substitution rule
+    across the four slice 2 canned texts.
+    """
+    role = (target_role_text or "").strip() or "that role"
+    return template.format(target_role=role)
+
+
 def _dispatch_recommender_from_intent(
     *,
     staged: StagedProfile,
@@ -817,6 +879,7 @@ def _dispatch_recommender_from_intent(
         build_recommender_evidence_adjacent_noc_standard,
         build_recommender_evidence_local_gap_coach,
         build_recommender_evidence_target_noc_standard,
+        filter_matches_to_target_family,
     )
     from skillbridge.chat.development_plan import compute_primary_gap_name
     from skillbridge.match.engine import (
@@ -831,17 +894,34 @@ def _dispatch_recommender_from_intent(
     rec_evidence: RecommenderEvidence | None = None
     try:
         if mode == "local_gap_coach":
+            # Slice 2 (locked 2026-06-23): Layer B path with target-NOC
+            # filter + 3-branch decision tree.
+            #
+            # Step 1: engine top-5 by skill overlap (unfiltered shape).
+            # Step 2: filter to target NOC family (exact preferred,
+            #         minor-group fallback). Without this, off-target
+            #         postings (Communication Operator when target is
+            #         accounting clerk) bleed into CP4's gap ranking.
+            # Step 3: CP4 picks primary gap from FILTERED postings only.
+            # Step 4: assemble Layer B evidence from FILTERED postings.
+            # Step 5: three branches based on (evidence, has_resume):
+            #   (a) evidence has content -> render Layer B + offer C
+            #   (b) evidence empty + no resume -> ask resume, stop
+            #   (c) evidence empty + has resume -> offer C, don't render C
             in_memory_matches = compute_matches_in_memory(staged, top=5)
+            filtered_matches = filter_matches_to_target_family(
+                in_memory_matches, staged.target_noc,
+            )
             primary = compute_primary_gap_name(
                 staged=staged,
                 user_message=user_message,
                 truth_enough_to_match=True,
                 truth_usable_evidence_present=True,
                 engine_completed=True,
-                in_memory_matches=in_memory_matches,
+                in_memory_matches=filtered_matches,
                 skill_adjacent_results=None,
                 snapshot_usable=True,
-                target_posting_count=len(in_memory_matches),
+                target_posting_count=len(filtered_matches),
             )
             registry = None
             if TRAINING_REGISTRY_ENABLED:
@@ -855,29 +935,122 @@ def _dispatch_recommender_from_intent(
                     )
                     registry = None
             rec_evidence = build_recommender_evidence_local_gap_coach(
-                match_results=in_memory_matches,
+                match_results=filtered_matches,
                 primary_gap_name=primary,
                 registry=registry,
                 today=date.today(),
             )
+
+            # Slice 2 branches (b) and (c): when Layer B evidence is
+            # empty, branch on resume presence. The evidence-build
+            # returned a wrapper with mode set + evidence tuple empty.
+            if not rec_evidence.evidence:
+                has_resume = _resume_facts_have_content(
+                    staged.resume_facts_json
+                )
+                target_phrase = staged.target_role_text
+                if not has_resume:
+                    # Branch (b): ask for resume. Persist deferred
+                    # intent so slice 1 machinery re-routes after
+                    # resume upload.
+                    reply = _format_canned_with_target(
+                        _ASK_RESUME_FOR_LAYER_B, target_phrase,
+                    )
+                    staged.deferred_career_intent = "local_skill_gap"
+                    staged.last_asked_slots = []
+                    staged.pending_recommender_offer = None
+                    staged.touch()
+                    new_session_id = store.save(staged)
+                    return {
+                        "reply": reply,
+                        "profile_id": None,
+                        "session_id": new_session_id,
+                        "intake_state": staged.intake_state,
+                        "asked_slots": [],
+                        "next_action": intake_state.ACTION_ASK_QUESTIONS,
+                        "recommended_jobs": [],
+                        "next_skill_suggestion": None,
+                        "resume_info": resume_info,
+                        "requires_consent": True,
+                    }
+                # Branch (c): emit C offer (do NOT render C). Set
+                # pending so next-turn "yes" routes via consume hook.
+                reply = _format_canned_with_target(
+                    _OFFER_C_AFTER_EMPTY_B, target_phrase,
+                )
+                staged.deferred_career_intent = None
+                staged.pending_recommender_offer = "adjacent_noc_standard"
+                staged.touch()
+                new_session_id = store.save(staged)
+                return {
+                    "reply": reply,
+                    "profile_id": None,
+                    "session_id": new_session_id,
+                    "intake_state": staged.intake_state,
+                    "asked_slots": [],
+                    "next_action": intake_state.ACTION_PRESENT_MATCHES,
+                    "recommended_jobs": [],
+                    "next_skill_suggestion": None,
+                    "resume_info": resume_info,
+                    "requires_consent": True,
+                }
+            # Branch (a): evidence has content. Fall through to the
+            # normal render + chain-advance path below.
         elif mode == "target_noc_standard":
             rec_evidence = build_recommender_evidence_target_noc_standard(
                 user_skill_ids=user_skill_ids,
                 target_noc=staged.target_noc,
             )
+            # Slice 2: Layer A direct-intent empty -> honest text.
+            # NEVER cascade to another layer.
+            if not rec_evidence.evidence:
+                reply = _format_canned_with_target(
+                    _LAYER_A_EMPTY_HONEST, staged.target_role_text,
+                )
+                staged.pending_recommender_offer = None
+                staged.touch()
+                new_session_id = store.save(staged)
+                return {
+                    "reply": reply,
+                    "profile_id": None,
+                    "session_id": new_session_id,
+                    "intake_state": staged.intake_state,
+                    "asked_slots": [],
+                    "next_action": intake_state.ACTION_PRESENT_MATCHES,
+                    "recommended_jobs": [],
+                    "next_skill_suggestion": None,
+                    "resume_info": resume_info,
+                    "requires_consent": True,
+                }
         elif mode == "adjacent_noc_standard":
-            # Known limitation in this slice: Layer C requires
-            # `last_adjacent_nocs` to be populated by a prior matching
-            # turn (the SET site that captured sideways_move adjacent
-            # NOCs). For intent-driven cold entry without that prior
-            # turn, the wrapper returns empty and the fallback renders
-            # honestly. Wiring full internal matching invocation
-            # (engine + adjacency pipeline) into this dispatcher is a
-            # follow-up slice per memo section 4.
+            # Known limitation: Layer C requires last_adjacent_nocs
+            # to be populated by a prior matching turn. For cold
+            # intent entry without that prior turn, the wrapper
+            # returns empty -- the slice 2 branch below emits an
+            # honest fallback instead of rendering empty Layer C.
             rec_evidence = build_recommender_evidence_adjacent_noc_standard(
                 user_skill_ids=user_skill_ids,
                 last_adjacent_nocs=staged.last_adjacent_nocs,
             )
+            # Slice 2: Layer C direct-intent empty -> honest text.
+            # NEVER cascade to A.
+            if not rec_evidence.evidence:
+                reply = _LAYER_C_EMPTY_HONEST
+                staged.pending_recommender_offer = None
+                staged.touch()
+                new_session_id = store.save(staged)
+                return {
+                    "reply": reply,
+                    "profile_id": None,
+                    "session_id": new_session_id,
+                    "intake_state": staged.intake_state,
+                    "asked_slots": [],
+                    "next_action": intake_state.ACTION_PRESENT_MATCHES,
+                    "recommended_jobs": [],
+                    "next_skill_suggestion": None,
+                    "resume_info": resume_info,
+                    "requires_consent": True,
+                }
     except Exception:  # noqa: BLE001
         log.exception(
             "recommender_intent_dispatch evidence_build_failed mode=%s",
@@ -913,9 +1086,10 @@ def _dispatch_recommender_from_intent(
     )
     reply = compose_response_v2(inp)
 
-    # Option A (locked): set the next chain mode so the prompt's
-    # closing offer is not dead. Uses the existing chain dict; this
-    # slice does NOT change it.
+    # Slice 2 chain (locked): B -> C (offer); C -> END; A -> END.
+    # The closing in the prompt/fallback matches whichever next_mode
+    # is set here -- so the user's "yes" on the next turn routes
+    # correctly via the consume helper.
     next_mode = _RECOMMENDER_NEXT_MODE.get(mode)
     staged.pending_recommender_offer = next_mode
     if next_mode is None:

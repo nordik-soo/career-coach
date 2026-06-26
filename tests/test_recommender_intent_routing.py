@@ -197,14 +197,18 @@ def test_local_skill_gap_dispatches_layer_b(monkeypatch):
         lambda **kwargs: "local_skill_gap",
     )
     _stub_engine_and_layer_a(monkeypatch)
-    sp = _make_staged()
+    sp = _make_staged()  # has_resume=False by default
     out = h._maybe_route_recommender_from_intent(
         staged=sp, message="what should I improve", store=_StubStore(),
     )
     assert out is not None
     assert isinstance(out["reply"], str) and out["reply"]
-    # Chain advances per existing _RECOMMENDER_NEXT_MODE (B -> A).
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Slice 2 branch (b): Layer B empty (engine stub returns []), and
+    # no resume -> ASK RESUME canned text emitted. Deferred intent
+    # persisted so slice 1 reroutes after upload.
+    assert "upload your resume" in out["reply"]
+    assert sp.deferred_career_intent == "local_skill_gap"
+    assert sp.pending_recommender_offer is None
 
 
 def test_noc_standard_dispatches_layer_a(monkeypatch):
@@ -219,8 +223,8 @@ def test_noc_standard_dispatches_layer_a(monkeypatch):
     )
     assert out is not None
     assert out["reply"]
-    # Chain: A -> C
-    assert sp.pending_recommender_offer == "adjacent_noc_standard"
+    # Slice 2: Layer A is intent-only and TERMINAL. Pending is None.
+    assert sp.pending_recommender_offer is None
 
 
 def test_career_exploration_dispatches_layer_c(monkeypatch):
@@ -244,7 +248,8 @@ def test_career_exploration_dispatches_layer_c(monkeypatch):
 
 def test_training_recommendation_routes_to_layer_b(monkeypatch):
     """training_recommendation and local_skill_gap both route to
-    local_gap_coach (Layer B). voice_hint differentiates them."""
+    local_gap_coach (Layer B). voice_hint differentiates them.
+    Slice 2: with empty matches + no resume, branch (b) fires."""
     monkeypatch.setattr(
         "skillbridge.chat.recommender_intent.classify_career_intent",
         lambda **kwargs: "training_recommendation",
@@ -255,8 +260,10 @@ def test_training_recommendation_routes_to_layer_b(monkeypatch):
         staged=sp, message="what training should I take", store=_StubStore(),
     )
     assert out is not None
-    # Same mode as local_skill_gap -- next chain mode is target_noc_standard
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Slice 2 branch (b): same as local_skill_gap -- ASK RESUME canned.
+    assert "upload your resume" in out["reply"]
+    assert sp.deferred_career_intent == "local_skill_gap"
+    assert sp.pending_recommender_offer is None
 
 
 # ---------------------------------------------------------------------------
@@ -376,18 +383,75 @@ def test_router_invocation_runs_only_after_resume_handling(monkeypatch):
 # ---------------------------------------------------------------------------
 def test_voice_hint_passes_through_to_responder(monkeypatch):
     """The router emits voice_hint; the dispatcher must pass it through
-    to ResponderV2Input.recommender_voice_hint."""
+    to ResponderV2Input.recommender_voice_hint.
+
+    Slice 2: the responder is reached only in Layer B branch (a)
+    (evidence has content). We construct a non-empty Layer B match
+    + primary gap so the dispatcher falls through to compose_response_v2.
+    """
     monkeypatch.setattr(
         "skillbridge.chat.recommender_intent.classify_career_intent",
         lambda **kwargs: "training_recommendation",
     )
-    _stub_engine_and_layer_a(monkeypatch)
+    # Slice 2: build a non-empty match path so Layer B evidence has
+    # content and the dispatcher reaches compose_response_v2.
+    from dataclasses import dataclass
+    from skillbridge.chat.gap_evidence import GapEvidence, RecommenderEvidence
+
+    @dataclass
+    class _M:
+        noc_code: str = "13110"
+        job_id: str = "job-1"
+        missing_skill_names: tuple = ("QuickBooks",)
+        missing_skill_ids: tuple = ("S_QB",)
+        title: str = "Admin assistant"
+
+    monkeypatch.setattr(
+        "skillbridge.match.engine.compute_matches_in_memory",
+        lambda staged, top=5: [_M()],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.build_user_skill_rows",
+        lambda skills: [],
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.engine.derive_user_skill_sets",
+        lambda rows: (set(), set(), set()),
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.development_plan.compute_primary_gap_name",
+        lambda **kwargs: "QuickBooks",
+    )
+    # Stub Layer B assembly to return a non-empty evidence so the
+    # 3-branch logic takes branch (a) and falls through to the
+    # responder.
+    fake_gap = GapEvidence(
+        layer="local_posting",
+        source_id="job-1",
+        source_label="Admin assistant",
+        skill_id="S_QB",
+        skill_name="QuickBooks",
+        blocker=False,
+        importance=None,
+        source="extracted.job_skill",
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly.build_recommender_evidence_local_gap_coach",
+        lambda **kwargs: RecommenderEvidence(
+            mode="local_gap_coach",
+            evidence=(fake_gap,),
+            training=(),
+        ),
+    )
 
     captured: dict = {}
 
     def capture_response(inp):
         captured["voice_hint"] = inp.recommender_voice_hint
-        captured["mode"] = inp.recommendation_evidence.mode if inp.recommendation_evidence else None
+        captured["mode"] = (
+            inp.recommendation_evidence.mode
+            if inp.recommendation_evidence else None
+        )
         return "stub response"
 
     monkeypatch.setattr(
@@ -404,6 +468,8 @@ def test_voice_hint_passes_through_to_responder(monkeypatch):
     )
     assert captured["voice_hint"] == "training_recommendation"
     assert captured["mode"] == "local_gap_coach"
+    # Slice 2: B has content -> chain advances to C.
+    assert sp.pending_recommender_offer == "adjacent_noc_standard"
 
 
 # ---------------------------------------------------------------------------
@@ -450,8 +516,12 @@ def test_target_role_text_set_but_noc_unresolved_resolves_before_substrate(
     assert resolved_called == ["accounting clerk"]
     # Resolution was persisted to staged.target_noc so downstream uses it.
     assert sp.target_noc == "14200"
-    # Substrate gate passed -> recommender_layer dispatched (not ask_substrate).
-    assert sp.pending_recommender_offer == "target_noc_standard"
+    # Slice 2: Layer B empty + no resume -> branch (b) canned ask
+    # (substrate gate passed -> dispatched recommender_layer; the
+    # 3-branch logic then asked for resume since matches were empty).
+    assert "upload your resume" in out["reply"]
+    assert sp.deferred_career_intent == "local_skill_gap"
+    assert sp.pending_recommender_offer is None
 
 
 def test_resolver_failure_leaves_target_noc_none_falls_through(monkeypatch):
@@ -686,7 +756,10 @@ def test_deferred_intent_persisted_on_ask_substrate(monkeypatch):
 def test_deferred_intent_consumed_when_substrate_fills(monkeypatch):
     """When a prior turn set deferred_career_intent and this turn's
     message classifies as `unclear` AND substrate is now sufficient,
-    the bridge routes to the deferred intent and clears the flag."""
+    the bridge routes to the deferred intent and clears the flag.
+    Slice 2: stub stubs empty matches, so the dispatcher hits the
+    'Layer B empty + no resume' branch and sets a NEW deferred
+    intent (the canned ask)."""
     _stub_engine_and_layer_a(monkeypatch)
     monkeypatch.setattr(
         "skillbridge.chat.recommender_intent.classify_career_intent",
@@ -699,15 +772,20 @@ def test_deferred_intent_consumed_when_substrate_fills(monkeypatch):
         store=_StubStore(),
     )
     assert out is not None
-    # The deferred intent was used to route -- chain advanced.
-    assert sp.pending_recommender_offer == "target_noc_standard"
-    # And the flag was cleared.
-    assert sp.deferred_career_intent is None
+    # Slice 2: dispatch routed via deferred intent, then the 3-branch
+    # logic asked for resume (Layer B empty + no resume). The deferred
+    # intent is RE-SET so slice 1 reroutes after resume upload.
+    assert "upload your resume" in out["reply"]
+    assert sp.deferred_career_intent == "local_skill_gap"
+    assert sp.pending_recommender_offer is None
 
 
 def test_explicit_current_intent_clears_deferred(monkeypatch):
     """If the current message has an explicit non-unclear intent,
-    the deferred intent gets cleared (current wins over deferred)."""
+    the deferred intent gets cleared (current wins over deferred).
+    Slice 2: but if the explicit intent then re-defers (Layer B
+    empty + no resume), deferred_career_intent ends up SET again
+    to the new intent (local_skill_gap), not None."""
     _stub_engine_and_layer_a(monkeypatch)
     monkeypatch.setattr(
         "skillbridge.chat.recommender_intent.classify_career_intent",
@@ -719,8 +797,11 @@ def test_explicit_current_intent_clears_deferred(monkeypatch):
         staged=sp, message="what training should I take?",
         store=_StubStore(),
     )
-    # Deferred was overridden, not consumed, and cleared.
-    assert sp.deferred_career_intent is None
+    # Slice 2: the stale "noc_standard_comparison" was cleared by the
+    # current explicit intent (training_recommendation -> Layer B),
+    # then Layer B's empty + no resume branch re-set deferred to
+    # "local_skill_gap" (the canonical deferrable intent).
+    assert sp.deferred_career_intent == "local_skill_gap"
 
 
 def test_deferred_intent_not_revived_for_invalid_value(monkeypatch):
@@ -1021,11 +1102,12 @@ def test_end_to_end_intent_deferred_then_consumed_on_target_fill(monkeypatch):
         staged=sp, message="accounting clerk", store=store,
     )
     assert out2 is not None
-    # Classifier returned unclear, bridge consumed deferred ->
-    # routed to local_skill_gap -> dispatched local_gap_coach.
-    assert sp.pending_recommender_offer == "target_noc_standard"
-    # Deferred was consumed.
-    assert sp.deferred_career_intent is None
+    # Slice 2: deferred consumed -> dispatched local_gap_coach ->
+    # Layer B empty + no resume -> branch (b): canned ask re-set
+    # deferred and pending=None.
+    assert "upload your resume" in out2["reply"]
+    assert sp.deferred_career_intent == "local_skill_gap"
+    assert sp.pending_recommender_offer is None
 
 
 def test_target_noc_already_set_skips_resolver(monkeypatch):

@@ -54,15 +54,18 @@ def _gap(layer, skill_id, skill_name, importance=None, blocker=False,
 
 
 def test_local_gap_coach_empty_evidence():
-    """When CP4 returns None / Layer B is empty, the fallback honestly
-    says nothing surfaced as the top gap and still emits the locked
-    chain close to target_noc_standard."""
+    """Slice 2: when Layer B evidence is empty AND the fallback is
+    invoked directly (defensive path -- handler's slice 2 branches
+    normally emit canned text BEFORE reaching the responder), the
+    fallback honestly says nothing surfaced and emits the new
+    B->C chain close."""
     rec = RecommenderEvidence(
         mode="local_gap_coach", evidence=(), training=(),
     )
     text = render_recommender_fallback(rec)
     assert "didn't surface" in text.lower() or "don't have" in text.lower()
-    assert "Canadian/NOC standard" in text  # locked chain close
+    # Slice 2 chain close: B offers C, not A.
+    assert "related career paths" in text
 
 
 def test_local_gap_coach_with_evidence_and_no_training():
@@ -81,8 +84,8 @@ def test_local_gap_coach_with_evidence_and_no_training():
     text = render_recommender_fallback(rec)
     assert "bank reconciliation" in text
     assert "Sault Community Career Centre" in text
-    # Locked chain close present.
-    assert "Canadian/NOC standard" in text
+    # Slice 2 chain close: B offers C.
+    assert "related career paths" in text
     # No invented provider names.
     assert "Sault College" not in text
     assert "https://" not in text  # no URL when no training
@@ -114,7 +117,8 @@ def test_local_gap_coach_with_evidence_and_matching_training():
     assert "Sault College" in text
     assert "Bookkeeping fundamentals course" in text
     assert "https://saultcollege.ca/bookkeeping" in text
-    assert "Canadian/NOC standard" in text  # chain close
+    # Slice 2 chain close: B offers C.
+    assert "related career paths" in text
 
 
 def test_local_gap_coach_training_attached_by_skill_id_preferred():
@@ -169,15 +173,19 @@ def test_local_gap_coach_training_falls_back_to_name_when_skill_id_null():
 # target_noc_standard
 # ---------------------------------------------------------------------------
 def test_target_noc_standard_empty_evidence():
-    """When the NOC has no OaSIS profile, fallback honestly says so and
-    still emits the locked chain close to adjacent_noc_standard."""
+    """Slice 2: Layer A is intent-only and closes NATURAL (no chain).
+    Empty evidence is rare for A in production but the defensive
+    fallback should not advertise a chain."""
     rec = RecommenderEvidence(
         mode="target_noc_standard", evidence=(), training=(),
     )
     text = render_recommender_fallback(rec)
     assert "don't have" in text.lower() or "no" in text.lower()
     assert "standard skill profile" in text.lower()
-    assert "related career paths" in text  # locked chain close
+    # Slice 2: natural close, no chain offer.
+    assert "Anything in there" in text
+    # No chain offer to other layers.
+    assert "related career paths" not in text
 
 
 def test_target_noc_standard_single_skill():
@@ -202,7 +210,9 @@ def test_target_noc_standard_single_skill():
     assert "you're missing" not in body
     assert "you can't" not in body
     assert "is a gap" not in body
-    assert "related career paths" in text  # chain close
+    # Slice 2: A closes natural (no chain).
+    assert "Anything in there" in text
+    assert "related career paths" not in text
 
 
 def test_target_noc_standard_three_skills_with_oxford_comma():
@@ -228,7 +238,9 @@ def test_target_noc_standard_three_skills_with_oxford_comma():
     assert "Numeracy" in text
     assert ", and Numeracy" in text  # Oxford comma
     assert "emphasizes" in text.lower()
-    assert "related career paths" in text  # chain close
+    # Slice 2: A closes natural (no chain).
+    assert "Anything in there" in text
+    assert "related career paths" not in text
 
 
 def test_target_noc_standard_no_forbidden_deficit_phrases():

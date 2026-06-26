@@ -3414,44 +3414,175 @@ _FORBIDDEN_ACHIEVABILITY_WORDS: tuple[str, ...] = (
 # achievability words, ends-with-?). Old shape helpers removed.
 
 
-def _build_user_block_for_recommender(inp: ResponderV2Input) -> str:
-    """Serialize the RecommenderEvidence wrapper into the prompt's
-    EVIDENCE PACKAGE block. Mirrors the shape documented in
-    RECOMMENDER_RESPONDER_PROMPT: USER_MESSAGE, MODE, EVIDENCE, TRAINING.
+def _compact_user_profile(inp: ResponderV2Input) -> dict[str, Any]:
+    """Slice 2: derive a compact USER_PROFILE block for the
+    recommender prompt. Carries the user's named skills, a flag for
+    whether a resume is attached, and a short work-history summary
+    when resume_facts has one.
 
-    The local_gap_coach mode is the ONLY mode that surfaces a non-empty
-    TRAINING block; the prompt's hard rule prevents the LLM from naming
-    providers in the other modes regardless of what we send, but we
-    keep TRAINING empty for those modes to avoid any accidental leak.
+    The LLM uses this to ground sentences like "your bookkeeping
+    experience already lines up here" -- without it, the LLM has no
+    evidence about what the user actually brings.
+    """
+    facts = inp.resume_facts or {}
+    named_skills: list[str] = []
+    raw_skills = facts.get("skills") or []
+    if isinstance(raw_skills, list):
+        for s in raw_skills:
+            if isinstance(s, dict):
+                name = s.get("name") or s.get("skill_name")
+            else:
+                name = s
+            if isinstance(name, str) and name.strip():
+                named_skills.append(name.strip())
+
+    # Compact work history summary -- one short string per role with
+    # title/employer/year-range so the LLM can reference real entries
+    # without us shipping the full resume_facts blob.
+    work_history_summary: list[str] = []
+    raw_wh = facts.get("work_history") or []
+    if isinstance(raw_wh, list):
+        for entry in raw_wh:
+            if not isinstance(entry, dict):
+                continue
+            title = entry.get("job_title") or entry.get("title") or ""
+            employer = entry.get("employer") or entry.get("company") or ""
+            start = entry.get("start_date") or entry.get("start") or ""
+            end = entry.get("end_date") or entry.get("end") or ""
+            parts = [p for p in (title, employer) if isinstance(p, str) and p.strip()]
+            base = " at ".join(parts) if parts else ""
+            if start or end:
+                base = f"{base} ({start}-{end})" if base else f"({start}-{end})"
+            if base:
+                work_history_summary.append(base)
+
+    has_resume = bool(
+        facts.get("skills")
+        or facts.get("work_history")
+        or facts.get("education")
+        or facts.get("certifications")
+        or facts.get("projects")
+        or facts.get("languages")
+    )
+
+    return {
+        "named_skills": named_skills,
+        "has_resume": has_resume,
+        "work_history_summary": work_history_summary,
+    }
+
+
+def _build_user_block_for_recommender(inp: ResponderV2Input) -> str:
+    """Serialize the recommender evidence into the prompt's EVIDENCE
+    PACKAGE block.
+
+    Slice 2 (locked 2026-06-23): richer per-layer shape so the LLM
+    can REASON from evidence rather than restate a generic list:
+
+      Always present:
+        USER_MESSAGE     - user's current turn (verbatim)
+        TARGET_ROLE_TEXT - user's stated role, e.g. "accounting clerk"
+                           (NOT the OaSIS source_label/title -- those
+                           are background context only)
+        USER_PROFILE     - {named_skills, has_resume, work_history_summary}
+                           the user's evidence to reason FROM
+        MODE             - "local_gap_coach" | "target_noc_standard" | "adjacent_noc_standard"
+        VOICE_HINT       - CareerIntent string from the router; lets
+                           Layer B differentiate skill_gap vs
+                           training_recommendation framing
+
+      Mode-specific evidence:
+        local_gap_coach (Layer B):
+          LAYER_B_EVIDENCE = {primary_gap, lead_posting, user_overlapping_skills}
+          LAYER_B_TRAINING = [{provider, summary, url}]
+        target_noc_standard (Layer A):
+          LAYER_A_EVIDENCE = {noc_code, oasis_title, top_development_areas}
+        adjacent_noc_standard (Layer C):
+          LAYER_C_EVIDENCE = [{noc_code, noc_title, development_areas}]
+
+    The prompt's anti-template guards instruct the LLM to combine
+    these fields in coach prose, not list them as bullets.
     """
     rec = inp.recommendation_evidence
     assert rec is not None  # caller guards
-    payload = {
+
+    profile = _compact_user_profile(inp)
+    payload: dict[str, Any] = {
         "USER_MESSAGE": inp.user_message,
+        "TARGET_ROLE_TEXT": inp.target_role_text or "",
+        "USER_PROFILE": profile,
         "MODE": rec.mode,
-        "EVIDENCE": [
+        "VOICE_HINT": (
+            inp.recommender_voice_hint
+            if isinstance(inp.recommender_voice_hint, str)
+            else None
+        ),
+    }
+
+    if rec.mode == "local_gap_coach":
+        # Layer B's GapEvidence record carries source_label (posting
+        # title) and source_id (job_id) directly from the matched
+        # posting. employer and noc_code are not on GapEvidence; the
+        # LLM can reference "the local bookkeeper posting" without
+        # them. user_overlapping_skills is left for the LLM to reason
+        # from USER_PROFILE.named_skills + LAYER_B_EVIDENCE.primary_gap
+        # (the prompt instructs this combination).
+        primary_gap = rec.evidence[0] if rec.evidence else None
+        layer_b_ev: dict[str, Any] = {
+            "primary_gap": primary_gap.skill_name if primary_gap else None,
+            "primary_gap_skill_id": (
+                primary_gap.skill_id if primary_gap else None
+            ),
+            "lead_posting": (
+                {
+                    "title": primary_gap.source_label,
+                    "job_id": primary_gap.source_id,
+                }
+                if primary_gap is not None
+                else None
+            ),
+        }
+        payload["LAYER_B_EVIDENCE"] = layer_b_ev
+        payload["LAYER_B_TRAINING"] = [
             {
-                "skill_id": g.skill_id,
-                "skill_name": g.skill_name,
-                "blocker": g.blocker,
-                "importance": g.importance,
-                "source_id": g.source_id,
-                "source_label": g.source_label,
-            }
-            for g in rec.evidence
-        ],
-        "TRAINING": [
-            {
-                "skill_id": t.skill_id,
-                "skill_name": t.skill_name,
                 "provider": t.provider,
-                "type": t.type,
-                "url": t.url,
                 "summary": t.summary,
+                "url": t.url,
             }
             for t in rec.training
-        ],
-    }
+        ]
+    elif rec.mode == "target_noc_standard":
+        # All evidence records share a NOC source; pick first for
+        # noc_code/oasis_title context.
+        first = rec.evidence[0] if rec.evidence else None
+        payload["LAYER_A_EVIDENCE"] = {
+            "noc_code": first.source_id if first else None,
+            "oasis_title": first.source_label if first else None,
+            "top_development_areas": [
+                {
+                    "name": g.skill_name,
+                    "importance": g.importance,
+                }
+                for g in rec.evidence
+            ],
+        }
+    elif rec.mode == "adjacent_noc_standard":
+        # Group evidence records by NOC, preserving first-seen order
+        # (assembly already capped per-NOC at top-3 by importance).
+        grouped: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for g in rec.evidence:
+            key = g.source_id or "unknown"
+            if key not in grouped:
+                grouped[key] = {
+                    "noc_code": g.source_id,
+                    "noc_title": g.source_label or key,
+                    "development_areas": [],
+                }
+                order.append(key)
+            grouped[key]["development_areas"].append(g.skill_name)
+        payload["LAYER_C_EVIDENCE"] = [grouped[k] for k in order]
+
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -3479,12 +3610,16 @@ def _compose_recommender_response(inp: ResponderV2Input) -> str:
         return render_recommender_fallback(None)
 
     if not is_enabled():
-        return render_recommender_fallback(rec)
+        return render_recommender_fallback(
+            rec, target_role_text=inp.target_role_text,
+        )
 
     user_block = _build_user_block_for_recommender(inp)
     reply = call(RECOMMENDER_RESPONDER_PROMPT, user_block, max_tokens=800)
     if not reply:
-        return render_recommender_fallback(rec)
+        return render_recommender_fallback(
+            rec, target_role_text=inp.target_role_text,
+        )
 
     return reply
 

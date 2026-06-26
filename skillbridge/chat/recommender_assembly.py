@@ -49,6 +49,61 @@ log = logging.getLogger(__name__)
 _TOP_K_PER_NOC: int = 3
 
 
+# Slice 2 (re-introduced 2026-06-23 after revert of f277e60): Layer B
+# target-NOC family filter. Matching engine's top-5 by skill overlap
+# can include off-target NOCs (live verify: Communication Operator
+# 14404 and admin assistant 13110 appeared when target was accounting
+# clerk 14200). Layer B must anchor on target-NOC postings before CP4
+# picks the primary gap; otherwise CP4 ranks across off-target
+# postings and recommends gaps from the wrong occupation. Strict
+# filter: exact NOC preferred, minor-group fallback, else empty
+# (Layer B then enters the new slice 2 three-branch logic in handler).
+def filter_matches_to_target_family(
+    match_results: Iterable[Any],
+    target_noc: str | None,
+) -> list[Any]:
+    """Filter MatchResults to target-NOC family for Layer B grounding.
+
+    Returns:
+        - All match_results unchanged when target_noc is None / not a
+          5-digit numeric (no anchor available).
+        - Subset whose `noc_code` equals target_noc exactly (preferred).
+        - Else subset whose `noc_code` shares the first 4 digits with
+          target_noc (minor-group fallback).
+        - Empty list when neither yields a result. The caller's
+          Layer B path then enters the empty-evidence branch.
+
+    Args:
+        match_results: any iterable of MatchResult-like objects with
+            a `noc_code: str | None` attribute. Items without a valid
+            noc_code are skipped in family fallback.
+        target_noc: the user's resolved target NOC, 5-digit string.
+    """
+    materialized = list(match_results)
+    if not isinstance(target_noc, str):
+        return materialized
+    code = target_noc.strip()
+    if len(code) != 5 or not code.isdigit():
+        return materialized
+
+    exact = [
+        m for m in materialized
+        if isinstance(getattr(m, "noc_code", None), str)
+        and getattr(m, "noc_code") == code
+    ]
+    if exact:
+        return exact
+
+    target_minor = code[:4]
+    family = [
+        m for m in materialized
+        if isinstance(getattr(m, "noc_code", None), str)
+        and getattr(m, "noc_code", "").startswith(target_minor)
+        and len(getattr(m, "noc_code", "")) == 5
+    ]
+    return family
+
+
 @dataclass(frozen=True, slots=True)
 class _AdjacentNocShim:
     """Tiny adapter so compute_adjacent_noc_standard_gaps (which expects
