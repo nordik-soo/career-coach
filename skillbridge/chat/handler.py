@@ -715,6 +715,59 @@ def _dispatch_recommender_consume(
         # if some future mode is added without a branch, fall through.
         return None
 
+    # Slice 2 (locked 2026-06-23) follow-up: empty-evidence guards in
+    # the consume path. The intent-driven dispatcher already emits
+    # honest canned text when Layer A or Layer C evidence is empty,
+    # but the consent path was falling through to compose_response_v2
+    # with an empty wrapper -- the LLM then hallucinated plausible
+    # but ungrounded role names (live verify 2026-06-26 surfaced this:
+    # yes-consent to B's C-offer when last_adjacent_nocs was empty
+    # produced "bookkeeper roles, financial analyst positions" out of
+    # thin air). Mirror the intent-driven guards here so consent +
+    # empty-evidence stays honest.
+    if mode == "adjacent_noc_standard" and not rec_evidence.evidence:
+        reply = _LAYER_C_EMPTY_HONEST
+        staged.pending_recommender_offer = None
+        staged.last_adjacent_nocs = ()
+        staged.touch()
+        new_session_id = store.save(staged)
+        return {
+            "reply": reply,
+            "profile_id": None,
+            "session_id": new_session_id,
+            "intake_state": staged.intake_state,
+            "asked_slots": [],
+            "next_action": intake_state.ACTION_PRESENT_MATCHES,
+            "recommended_jobs": [],
+            "next_skill_suggestion": None,
+            "resume_info": resume_info,
+            "requires_consent": True,
+        }
+    if mode == "target_noc_standard" and not rec_evidence.evidence:
+        # Defensive: A is intent-only in the new chain (slice 2 chain
+        # B -> C -> END, A -> END with no chain in), so consent should
+        # not normally land here. Stale pending state from legacy
+        # cookies could still arrive; emit honest text.
+        reply = _format_canned_with_target(
+            _LAYER_A_EMPTY_HONEST, staged.target_role_text,
+        )
+        staged.pending_recommender_offer = None
+        staged.last_adjacent_nocs = ()
+        staged.touch()
+        new_session_id = store.save(staged)
+        return {
+            "reply": reply,
+            "profile_id": None,
+            "session_id": new_session_id,
+            "intake_state": staged.intake_state,
+            "asked_slots": [],
+            "next_action": intake_state.ACTION_PRESENT_MATCHES,
+            "recommended_jobs": [],
+            "next_skill_suggestion": None,
+            "resume_info": resume_info,
+            "requires_consent": True,
+        }
+
     # Synthesize a passthrough ArbiterDecision. compose_response_v2's
     # recommender early-return ignores `decision` so this value is
     # never consulted downstream -- but the dataclass requires it.

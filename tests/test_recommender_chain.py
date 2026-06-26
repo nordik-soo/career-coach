@@ -277,6 +277,89 @@ def test_yes_at_adjacent_mode_ends_chain_and_clears_last_adjacent(monkeypatch):
     assert sp.last_adjacent_nocs == ()  # cache cleared
 
 
+def test_yes_consent_empty_layer_c_emits_honest_text_no_llm(monkeypatch):
+    """Slice 2 follow-up (2026-06-26 live verify): when consume fires
+    Layer C and evidence is empty (cold-start: last_adjacent_nocs not
+    populated), the dispatcher must emit _LAYER_C_EMPTY_HONEST canned
+    text -- NEVER call the LLM responder, which would hallucinate
+    plausible-but-ungrounded role names.
+
+    Asymmetry fix: the intent-driven dispatcher already had this guard;
+    the consent path didn't. Live verify surfaced the bug ("bookkeeper
+    roles, financial analyst positions" invented out of thin air)."""
+    sp = _make_staged(
+        pending="adjacent_noc_standard",
+        last_adjacent_nocs=(),  # cold-start -- nothing to surface
+    )
+    store = _StubStore()
+
+    # Stub LLM so we can assert it is NEVER called. compose_response_v2
+    # is what would invoke the LLM; if we get past the guard, the
+    # LLM-disabled fallback would render a different empty string.
+    llm_called = []
+
+    def fail_if_called(*args, **kwargs):
+        llm_called.append(True)
+        return "HALLUCINATED LLM REPLY"
+
+    monkeypatch.setattr(
+        "skillbridge.chat.handler.compose_response_v2", fail_if_called,
+    )
+
+    result = _dispatch_recommender_consume(
+        staged=sp, user_message="yes", store=store, resume_info=None,
+    )
+    assert result is not None
+    # Canned honest text emitted -- not the hallucinated LLM reply.
+    assert llm_called == []
+    assert "Nothing surfaced" in result["reply"]
+    assert "related roles" in result["reply"]
+    # Chain ENDS here; last_adjacent_nocs cleared.
+    assert sp.pending_recommender_offer is None
+    assert sp.last_adjacent_nocs == ()
+
+
+def test_yes_consent_empty_layer_a_emits_honest_text_no_llm(monkeypatch):
+    """Slice 2 follow-up: defensive guard for Layer A in the consent
+    path. A is intent-only in the new chain, but stale cookies could
+    arrive with pending='target_noc_standard'. When evidence is empty
+    AND consent='yes', emit _LAYER_A_EMPTY_HONEST canned text with
+    target_role substituted. NEVER call the LLM."""
+    sp = _make_staged(
+        pending="target_noc_standard",
+        target_role="accounting clerk",
+    )
+    store = _StubStore()
+
+    # Stub OaSIS fetch to return empty -> Layer A evidence empty.
+    monkeypatch.setattr(
+        "skillbridge.chat.gap_evidence._fetch_noc_skill_rows",
+        lambda noc: [],
+    )
+
+    llm_called = []
+
+    def fail_if_called(*args, **kwargs):
+        llm_called.append(True)
+        return "HALLUCINATED LLM REPLY"
+
+    monkeypatch.setattr(
+        "skillbridge.chat.handler.compose_response_v2", fail_if_called,
+    )
+
+    result = _dispatch_recommender_consume(
+        staged=sp, user_message="yes", store=store, resume_info=None,
+    )
+    assert result is not None
+    assert llm_called == []
+    # Canned text emitted with target_role substituted.
+    assert "accounting clerk" in result["reply"]
+    assert "NOC standard" in result["reply"]
+    # Chain ends; flags cleared.
+    assert sp.pending_recommender_offer is None
+    assert sp.last_adjacent_nocs == ()
+
+
 def test_yes_at_local_gap_coach_advances_to_adjacent(monkeypatch):
     """Slice 2: when user yes-consents at local_gap_coach (Layer B),
     the chain advances to adjacent_noc_standard (Layer C), NOT to A.
