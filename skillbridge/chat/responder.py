@@ -724,11 +724,17 @@ def _fallback_reply(
 
 
 def _present_resume_facts_fallback(inp: ResponderInput) -> str:
-    """Deterministic confirmation summary when the LLM is off or fails.
+    """Deterministic resume-parsed summary when the LLM is off or fails.
 
     Reads from inp.resume_facts (post-suppression view). Mentions up to a
-    few work entries + the credential + the top skills. Ends with a
-    prompt asking the user to add/fix/remove. No bullets.
+    few work entries + the credential + the top skills. No bullets.
+
+    Updated 2026-06-29 (resume-confirm gate removal): does NOT ask for
+    confirmation of parsed facts. Conditional close:
+      - If inp.target_role_text is missing/empty: end with
+        "What kind of work are you looking for right now?"
+      - If inp.target_role_text is set: end with no question. The
+        user drives the next turn.
     """
     facts = inp.resume_facts or {}
     work = facts.get("work_history") or []
@@ -779,10 +785,14 @@ def _present_resume_facts_fallback(inp: ResponderInput) -> str:
             "work have you done?"
         )
 
-    pieces.append(
-        "Does that look right? You can add anything I missed, or tell me "
-        "to remove something that's not yours."
-    )
+    # Resume-confirm gate removed 2026-06-29. Conditional close based
+    # on whether target is already known.
+    target = (getattr(inp, "target_role_text", None) or "").strip()
+    if not target:
+        pieces.append(
+            "What kind of work are you looking for right now?"
+        )
+    # else: target is set -- no question; user drives the next turn.
     return " ".join(pieces)
 
 

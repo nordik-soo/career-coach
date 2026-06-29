@@ -345,3 +345,239 @@ def build_recommender_evidence_adjacent_noc_standard(
         evidence=tuple(out),
         training=(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 (2026-06-26) -- recommender-internal adjacency derivation
+# ---------------------------------------------------------------------------
+#
+# Cap = 3 adjacent NOCs in the surface. Justification: keep the Layer C
+# response conversational. A coach surfaces 1-3 related-role suggestions,
+# not 8; the user has to be able to pick one to drill into via the
+# existing follow-up close ("Want to dig into one of these in
+# particular?"). This is independent of _TOP_K_PER_NOC (which controls
+# per-NOC development-area count); they happen to be the same number (3)
+# but for different reasons.
+#
+# Internal coupling acknowledgment: the helper below imports
+# `_load_active_jobs_with_skills` (leading-underscore private function)
+# and `build_user_skill_sets` from skillbridge/match/adjacent.py. This
+# is intentional internal reuse -- we deliberately call the matching
+# engine's read-only helpers instead of reimplementing them -- but it
+# creates a coupling. If adjacent.py renames or changes those helpers,
+# the recommender breaks. Slice 4 tests catch this immediately (ImportError
+# or assertion failure). Accepted risk; documented here so the next
+# person renaming adjacent.py knows the recommender depends on it.
+_MAX_RECOMMENDER_ADJACENT_NOCS: int = 3
+
+
+def _compute_adjacent_nocs_for_recommender(staged: Any) -> tuple[str, ...]:
+    """Slice 4 (locked 2026-06-26, refined slice 4a): recommender-internal
+    adjacency derivation with strict-first + soft-fallback.
+
+    When Layer C is dispatched but staged.last_adjacent_nocs is empty
+    (cold start -- no prior matching turn populated it), this helper
+    invokes the matching engine's adjacency pipeline READ-ONLY to
+    derive adjacent NOCs ephemerally. Result is NOT persisted to
+    staged; the caller uses it only for this turn's Layer C evidence
+    wrapper assembly.
+
+    Strict-first / soft-fallback design (locked by live verify
+    2026-06-26):
+
+        retrieve_candidates    # broad SSM-filter
+            ↓
+        try accept_candidates  # CP5's strict gates (required coverage,
+                               # transferable threshold)
+            ↓
+        if strict_accepted has candidates:
+            candidates = strict_accepted
+            soft_used = False
+        else:
+            candidates = retrieved   # SOFT FALLBACK: drop the strict
+                                     # accept gate. Layer C is "career
+                                     # paths worth exploring," not
+                                     # "jobs you may fit" (CP5). The
+                                     # retrieve gate (SSM region +
+                                     # skill-hit OR minor-group) is
+                                     # the right bound for exploration.
+            soft_used = True
+            ↓
+        rank_adjacent          # always apply
+            ↓
+        drop_excluded(presented_job_ids)
+            ↓
+        extract distinct NOC codes, cap = _MAX_RECOMMENDER_ADJACENT_NOCS
+
+    Why strict-first instead of always-soft: when strict acceptance
+    DOES yield candidates, those NOCs have earned the surface (user
+    has real coverage + transferable evidence). Skipping that signal
+    would treat strong-fit users the same as weak-fit users. Live
+    verify of an accounting-clerk profile vs. SSM admin-assistant
+    postings hit the soft-fallback path because the strict gate's
+    required-coverage threshold rejected all candidates (Jordan
+    Miller has bookkeeping + payroll + Excel; admin assistant
+    postings list reception + calendar + phone as required). The
+    coach VOICE is still appropriate for the soft path -- the prompt
+    uses exploratory framing ("if you wanted to move toward [NOC],
+    that role leans on..."), not "you're well-positioned for X."
+
+    Internal coupling acknowledgment: imports `_load_active_jobs_with_skills`
+    (leading-underscore private function) and `build_user_skill_sets`
+    from skillbridge/match/adjacent.py. Intentional internal reuse;
+    if adjacent.py renames these, slice 4 tests catch it immediately.
+
+    Args:
+        staged: StagedProfile-like object. Reads only:
+            staged.skills, staged.target_noc, staged.last_match_snapshot.
+
+    Returns:
+        Tuple of distinct NOC code strings in rank order. Capped at
+        _MAX_RECOMMENDER_ADJACENT_NOCS (=3). Empty tuple if both
+        strict and soft yield nothing.
+
+    Defensive: any exception -> log + return (). Cold-start path
+    must NEVER crash the recommender turn -- slice 2 follow-up
+    empty-evidence guard then emits honest text.
+    """
+    try:
+        from skillbridge.match.adjacent import (
+            _load_active_jobs_with_skills,
+            accept_candidates,
+            build_user_skill_sets,
+            drop_excluded,
+            rank_adjacent,
+            retrieve_candidates,
+        )
+
+        user_ids, user_names, user_canon = build_user_skill_sets(
+            staged.skills,
+        )
+        all_jobs = _load_active_jobs_with_skills()
+
+        # Slice 4 diagnostic (2026-06-29 live verify): when retrieved=0
+        # in production we need to know WHY -- empty user-side skill
+        # sets, empty job pool, or non-empty-but-non-matching canonical
+        # gates. These three log lines provide enough signal to root-
+        # cause without instrumenting matching engine internals.
+        log.info(
+            "recommender_internal_adjacency_pre_retrieve "
+            "user_ids=%d user_names=%d user_canon=%d staged_skills=%d",
+            len(user_ids), len(user_names), len(user_canon),
+            len(staged.skills) if staged.skills else 0,
+        )
+        log.info(
+            "recommender_internal_adjacency_jobs_loaded "
+            "all_jobs=%d target_noc=%r",
+            len(all_jobs) if all_jobs else 0,
+            getattr(staged, "target_noc", None),
+        )
+        # Sample first 5 user skill names + first 5 names from the
+        # first SSM-region job so canonicalization mismatch shows up
+        # immediately (e.g. resume "QuickBooks Desktop" vs job
+        # "Microsoft Office").
+        user_name_sample = sorted(user_names)[:5] if user_names else []
+        sample_job_skills: list[str] = []
+        if all_jobs and isinstance(all_jobs, list):
+            for j in all_jobs:
+                if not isinstance(j, dict):
+                    continue
+                raw = j.get("skills") or []
+                if not isinstance(raw, list):
+                    continue
+                for s in raw:
+                    if isinstance(s, dict):
+                        n = s.get("skill_name")
+                        if isinstance(n, str) and n.strip():
+                            sample_job_skills.append(n.strip())
+                            if len(sample_job_skills) >= 5:
+                                break
+                if sample_job_skills:
+                    break
+        log.info(
+            "recommender_internal_adjacency_skill_samples "
+            "user_skill_sample=%s job_skill_sample=%s",
+            user_name_sample, sample_job_skills,
+        )
+
+        retrieved = retrieve_candidates(
+            staged,
+            snapshot=None,
+            all_jobs=all_jobs,
+            user_ids=user_ids,
+            user_names=user_names,
+            user_canon=user_canon,
+        )
+
+        # Strict-first: try the matching engine's strict acceptance.
+        strict_accepted, _drops = accept_candidates(
+            retrieved, staged, user_ids, user_names, user_canon,
+        )
+
+        # Soft-fallback: if strict accept yielded nothing but retrieve
+        # found plausible candidates, drop the strict gate. The
+        # retrieve gate (SSM + skill-hit OR minor-group hit) is
+        # already a meaningful bound for exploration purposes.
+        if strict_accepted:
+            candidates = strict_accepted
+            soft_used = False
+        else:
+            candidates = list(retrieved)
+            soft_used = True
+
+        ranked = rank_adjacent(
+            candidates, user_ids, user_names, user_canon,
+        )
+
+        # Exclude jobs already shown in this session (prevents
+        # recommender re-surfacing the same role the matcher just
+        # rendered as a tier card).
+        presented: tuple[str, ...] = ()
+        if isinstance(staged.last_match_snapshot, dict):
+            raw_presented = (
+                staged.last_match_snapshot.get("presented_job_ids") or ()
+            )
+            if isinstance(raw_presented, (list, tuple)):
+                presented = tuple(
+                    x for x in raw_presented if isinstance(x, str)
+                )
+        filtered = drop_excluded(ranked, presented)
+
+        # Extract distinct NOC codes from the ranked-and-filtered
+        # candidates, preserving rank order, capped at the
+        # conversational surface.
+        out: list[str] = []
+        seen: set[str] = set()
+        for job in filtered:
+            if not isinstance(job, dict):
+                continue
+            noc = job.get("noc_code")
+            if not isinstance(noc, str):
+                continue
+            noc_stripped = noc.strip()
+            if not noc_stripped or noc_stripped in seen:
+                continue
+            seen.add(noc_stripped)
+            out.append(noc_stripped)
+            if len(out) >= _MAX_RECOMMENDER_ADJACENT_NOCS:
+                break
+
+        # Diagnostic log so future "empty" cases are visible without
+        # adding instrumentation. Counts at each gate make the
+        # strict-vs-soft path immediately clear in production logs.
+        log.info(
+            "recommender_internal_adjacency "
+            "retrieved=%d strict_accepted=%d soft_used=%s "
+            "returned_nocs=%s",
+            len(retrieved),
+            len(strict_accepted),
+            soft_used,
+            list(out),
+        )
+        return tuple(out)
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "recommender_internal_adjacency_pipeline_failed; "
+            "returning empty",
+        )
+        return ()

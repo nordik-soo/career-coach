@@ -698,9 +698,22 @@ def _dispatch_recommender_consume(
                 target_noc=staged.target_noc,
             )
         elif mode == "adjacent_noc_standard":
+            # Slice 4 (2026-06-26): cold-start adjacency derivation.
+            # If a prior matching turn populated last_adjacent_nocs,
+            # use that (fast path). Otherwise invoke the matching
+            # engine's adjacency pipeline READ-ONLY here to derive
+            # adjacent NOCs ephemerally for this turn's Layer C
+            # wrapper. Result is NOT persisted to staged --
+            # ordinal followups + matching-turn lifecycle stay clean.
+            from skillbridge.chat.recommender_assembly import (
+                _compute_adjacent_nocs_for_recommender,
+            )
+            adjacent_nocs = staged.last_adjacent_nocs
+            if not adjacent_nocs:
+                adjacent_nocs = _compute_adjacent_nocs_for_recommender(staged)
             rec_evidence = build_recommender_evidence_adjacent_noc_standard(
                 user_skill_ids=user_skill_ids,
-                last_adjacent_nocs=staged.last_adjacent_nocs,
+                last_adjacent_nocs=adjacent_nocs,
             )
     except Exception:  # noqa: BLE001
         log.exception(
@@ -929,6 +942,7 @@ def _dispatch_recommender_from_intent(
     from datetime import date
     from skillbridge.chat.gap_evidence import RecommenderEvidence
     from skillbridge.chat.recommender_assembly import (
+        _compute_adjacent_nocs_for_recommender,
         build_recommender_evidence_adjacent_noc_standard,
         build_recommender_evidence_local_gap_coach,
         build_recommender_evidence_target_noc_standard,
@@ -1076,14 +1090,20 @@ def _dispatch_recommender_from_intent(
                     "requires_consent": True,
                 }
         elif mode == "adjacent_noc_standard":
-            # Known limitation: Layer C requires last_adjacent_nocs
-            # to be populated by a prior matching turn. For cold
-            # intent entry without that prior turn, the wrapper
-            # returns empty -- the slice 2 branch below emits an
-            # honest fallback instead of rendering empty Layer C.
+            # Slice 4 (2026-06-26): cold-start adjacency derivation.
+            # If a prior matching turn populated last_adjacent_nocs,
+            # use that (fast path). Otherwise invoke the matching
+            # engine's adjacency pipeline READ-ONLY via the recommender
+            # helper to derive adjacent NOCs ephemerally for this
+            # turn's Layer C wrapper. Result is NOT persisted to
+            # staged -- ordinal-followup state and matching-turn
+            # lifecycle remain owned by the matching engine.
+            adjacent_nocs = staged.last_adjacent_nocs
+            if not adjacent_nocs:
+                adjacent_nocs = _compute_adjacent_nocs_for_recommender(staged)
             rec_evidence = build_recommender_evidence_adjacent_noc_standard(
                 user_skill_ids=user_skill_ids,
-                last_adjacent_nocs=staged.last_adjacent_nocs,
+                last_adjacent_nocs=adjacent_nocs,
             )
             # Slice 2: Layer C direct-intent empty -> honest text.
             # NEVER cascade to A.

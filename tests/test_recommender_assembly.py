@@ -549,3 +549,316 @@ def test_filter_preserves_match_order():
     ]
     out = filter_matches_to_target_family(matches, "14200")
     assert [m.job_id for m in out] == ["a", "c"]
+
+
+# ===========================================================================
+# Slice 4 (2026-06-26): recommender-internal adjacency derivation
+# ===========================================================================
+from skillbridge.chat.recommender_assembly import (
+    _MAX_RECOMMENDER_ADJACENT_NOCS,
+    _compute_adjacent_nocs_for_recommender,
+)
+
+
+@dataclass
+class _FakeStaged:
+    """StagedProfile-like stub for slice 4 helper tests. Only the
+    fields the helper reads are present."""
+    skills: list[Any]
+    target_noc: str | None = "14200"
+    last_match_snapshot: dict | None = None
+
+
+def _patch_adjacency_pipeline(
+    monkeypatch,
+    *,
+    retrieve_returns: list[dict] | None = None,
+    accept_returns: list[dict] | None = None,
+    rank_returns: list[dict] | None = None,
+    drop_returns: list[dict] | None = None,
+    raise_on: str | None = None,
+):
+    """Patch every adjacency pipeline function the slice 4 helper
+    imports. Returns capture dicts so tests can assert call shapes.
+
+    raise_on: name of the function to make raise (for exception path
+    tests). One of: 'build_sets', 'load_jobs', 'retrieve', 'accept',
+    'rank', 'drop'."""
+    captured: dict = {}
+
+    def fake_build_sets(skills):
+        if raise_on == "build_sets":
+            raise RuntimeError("boom")
+        captured["build_sets"] = skills
+        return (set(), set(), set())
+
+    def fake_load_jobs():
+        if raise_on == "load_jobs":
+            raise RuntimeError("boom")
+        captured["load_jobs"] = True
+        return [{"job_id": "all-1"}]
+
+    def fake_retrieve(staged, *, snapshot, all_jobs, user_ids, user_names, user_canon):
+        if raise_on == "retrieve":
+            raise RuntimeError("boom")
+        captured["retrieve_staged"] = staged
+        captured["retrieve_snapshot"] = snapshot
+        return retrieve_returns or []
+
+    def fake_accept(retrieved, staged, user_ids, user_names, user_canon):
+        if raise_on == "accept":
+            raise RuntimeError("boom")
+        captured["accept_retrieved"] = retrieved
+        return (accept_returns or [], {})
+
+    def fake_rank(accepted, user_ids, user_names, user_canon):
+        if raise_on == "rank":
+            raise RuntimeError("boom")
+        captured["rank_accepted"] = accepted
+        return rank_returns or accepted
+
+    def fake_drop(ranked, presented):
+        if raise_on == "drop":
+            raise RuntimeError("boom")
+        captured["drop_presented"] = presented
+        return drop_returns if drop_returns is not None else ranked
+
+    monkeypatch.setattr(
+        "skillbridge.match.adjacent.build_user_skill_sets", fake_build_sets,
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.adjacent._load_active_jobs_with_skills",
+        fake_load_jobs,
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.adjacent.retrieve_candidates", fake_retrieve,
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.adjacent.accept_candidates", fake_accept,
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.adjacent.rank_adjacent", fake_rank,
+    )
+    monkeypatch.setattr(
+        "skillbridge.match.adjacent.drop_excluded", fake_drop,
+    )
+    return captured
+
+
+def test_cold_start_returns_empty_when_retrieve_and_accept_both_empty(monkeypatch):
+    """If retrieve_candidates returns nothing, helper returns ()
+    regardless of accept_candidates. Both gates yielded zero ->
+    nothing to explore."""
+    _patch_adjacency_pipeline(
+        monkeypatch, retrieve_returns=[], accept_returns=[],
+    )
+    staged = _FakeStaged(skills=[])
+    out = _compute_adjacent_nocs_for_recommender(staged)
+    assert out == ()
+
+
+# ===========================================================================
+# Slice 4a (strict-first + soft-fallback)
+# ===========================================================================
+def test_strict_path_used_when_accept_candidates_yields_candidates(
+    monkeypatch, caplog,
+):
+    """Slice 4a: when accept_candidates returns >0 candidates, those
+    are used. Soft fallback path is NOT taken (soft_used=False).
+    The strict path's signal is preserved."""
+    retrieve_returns = [
+        {"job_id": "r1", "noc_code": "13110"},
+        {"job_id": "r2", "noc_code": "13100"},
+        {"job_id": "r3", "noc_code": "11200"},
+    ]
+    accept_returns = [
+        {"job_id": "r1", "noc_code": "13110"},  # strict accepted
+        {"job_id": "r2", "noc_code": "13100"},
+    ]
+    captured = _patch_adjacency_pipeline(
+        monkeypatch,
+        retrieve_returns=retrieve_returns,
+        accept_returns=accept_returns,
+    )
+    staged = _FakeStaged(skills=[])
+    with caplog.at_level("INFO", logger="skillbridge.chat.recommender_assembly"):
+        out = _compute_adjacent_nocs_for_recommender(staged)
+    # NOCs from strict_accepted only (r3 NOT included).
+    assert out == ("13110", "13100")
+    # rank_adjacent received the STRICT accepted candidates, not retrieved.
+    assert captured["rank_accepted"] == accept_returns
+    # Log shows soft_used=False.
+    assert "soft_used=False" in caplog.text
+
+
+def test_soft_fallback_used_when_strict_empty_but_retrieve_nonempty(
+    monkeypatch, caplog,
+):
+    """Slice 4a soft fallback: strict accept yields empty, retrieve
+    yielded candidates -> drop the strict gate and use retrieved.
+    soft_used=True flagged in log."""
+    retrieve_returns = [
+        {"job_id": "r1", "noc_code": "13110"},
+        {"job_id": "r2", "noc_code": "11200"},
+    ]
+    accept_returns = []  # strict gates rejected everyone
+    captured = _patch_adjacency_pipeline(
+        monkeypatch,
+        retrieve_returns=retrieve_returns,
+        accept_returns=accept_returns,
+    )
+    staged = _FakeStaged(skills=[])
+    with caplog.at_level("INFO", logger="skillbridge.chat.recommender_assembly"):
+        out = _compute_adjacent_nocs_for_recommender(staged)
+    # NOCs from retrieve_returns (soft fallback).
+    assert out == ("13110", "11200")
+    # rank_adjacent received the RETRIEVED candidates (soft path).
+    assert captured["rank_accepted"] == retrieve_returns
+    # Log shows soft_used=True.
+    assert "soft_used=True" in caplog.text
+
+
+def test_diagnostic_log_includes_count_breakdown(monkeypatch, caplog):
+    """Slice 4a: the success-path log records retrieved=N
+    strict_accepted=M soft_used=<bool> returned_nocs=[...]"""
+    retrieve_returns = [
+        {"job_id": "r1", "noc_code": "13110"},
+        {"job_id": "r2", "noc_code": "13100"},
+        {"job_id": "r3", "noc_code": "11200"},
+    ]
+    accept_returns = [{"job_id": "r1", "noc_code": "13110"}]
+    _patch_adjacency_pipeline(
+        monkeypatch,
+        retrieve_returns=retrieve_returns,
+        accept_returns=accept_returns,
+    )
+    staged = _FakeStaged(skills=[])
+    with caplog.at_level("INFO", logger="skillbridge.chat.recommender_assembly"):
+        _compute_adjacent_nocs_for_recommender(staged)
+    log_text = caplog.text
+    assert "retrieved=3" in log_text
+    assert "strict_accepted=1" in log_text
+    assert "soft_used=False" in log_text
+    assert "13110" in log_text  # returned_nocs in log
+
+
+def test_cold_start_extracts_distinct_nocs_in_rank_order(monkeypatch):
+    """Helper extracts distinct NOC codes from ranked candidates,
+    preserving rank order (first-seen wins on duplicates)."""
+    drop_returns = [
+        {"job_id": "j1", "noc_code": "13110"},
+        {"job_id": "j2", "noc_code": "13100"},
+        {"job_id": "j3", "noc_code": "13110"},  # duplicate -> skipped
+        {"job_id": "j4", "noc_code": "11200"},
+    ]
+    _patch_adjacency_pipeline(monkeypatch, drop_returns=drop_returns)
+    staged = _FakeStaged(skills=[])
+    out = _compute_adjacent_nocs_for_recommender(staged)
+    assert out == ("13110", "13100", "11200")
+
+
+def test_cold_start_caps_at_3_distinct_nocs(monkeypatch):
+    """Cap = _MAX_RECOMMENDER_ADJACENT_NOCS (3) for conversational UX.
+    Even if 5 distinct NOCs are available, only top-3 by rank are kept."""
+    drop_returns = [
+        {"job_id": "j1", "noc_code": "13110"},
+        {"job_id": "j2", "noc_code": "13100"},
+        {"job_id": "j3", "noc_code": "11200"},
+        {"job_id": "j4", "noc_code": "14404"},
+        {"job_id": "j5", "noc_code": "60010"},
+    ]
+    _patch_adjacency_pipeline(monkeypatch, drop_returns=drop_returns)
+    staged = _FakeStaged(skills=[])
+    out = _compute_adjacent_nocs_for_recommender(staged)
+    assert len(out) == 3
+    assert out == ("13110", "13100", "11200")  # first three by rank
+
+
+def test_cold_start_max_constant_is_three():
+    """Lock the cap constant. Cap = 3 adjacent NOCs in the
+    conversational surface (a coach surfaces 1-3 related-role
+    suggestions, not 8). Independent of _TOP_K_PER_NOC (per-NOC
+    development areas)."""
+    assert _MAX_RECOMMENDER_ADJACENT_NOCS == 3
+
+
+def test_cold_start_skips_jobs_without_noc_code(monkeypatch):
+    """Defensive: jobs with missing or non-str noc_code are skipped."""
+    drop_returns = [
+        {"job_id": "j1"},  # no noc_code
+        {"job_id": "j2", "noc_code": None},
+        {"job_id": "j3", "noc_code": 13110},  # int, not str
+        {"job_id": "j4", "noc_code": "13110"},  # valid
+        {"job_id": "j5", "noc_code": "  "},  # blank
+        {"job_id": "j6", "noc_code": "13100"},  # valid
+    ]
+    _patch_adjacency_pipeline(monkeypatch, drop_returns=drop_returns)
+    staged = _FakeStaged(skills=[])
+    out = _compute_adjacent_nocs_for_recommender(staged)
+    assert out == ("13110", "13100")
+
+
+def test_cold_start_passes_presented_job_ids_to_drop_excluded(monkeypatch):
+    """When staged.last_match_snapshot has presented_job_ids, the
+    helper passes them to drop_excluded so previously-shown jobs are
+    excluded from adjacency derivation."""
+    captured = _patch_adjacency_pipeline(monkeypatch, drop_returns=[])
+    staged = _FakeStaged(
+        skills=[],
+        last_match_snapshot={
+            "presented_job_ids": ["job-a", "job-b"],
+        },
+    )
+    _compute_adjacent_nocs_for_recommender(staged)
+    # drop_excluded received the presented job_ids tuple.
+    assert captured["drop_presented"] == ("job-a", "job-b")
+
+
+def test_cold_start_empty_presented_when_no_snapshot(monkeypatch):
+    """No snapshot -> drop_excluded receives empty presented tuple."""
+    captured = _patch_adjacency_pipeline(monkeypatch, drop_returns=[])
+    staged = _FakeStaged(skills=[], last_match_snapshot=None)
+    _compute_adjacent_nocs_for_recommender(staged)
+    assert captured["drop_presented"] == ()
+
+
+def test_cold_start_skips_non_str_presented_job_ids(monkeypatch):
+    """Defensive: forged-cookie presented_job_ids with non-str entries
+    are filtered before passing to drop_excluded."""
+    captured = _patch_adjacency_pipeline(monkeypatch, drop_returns=[])
+    staged = _FakeStaged(
+        skills=[],
+        last_match_snapshot={
+            "presented_job_ids": ["job-a", None, 42, "job-b"],
+        },
+    )
+    _compute_adjacent_nocs_for_recommender(staged)
+    assert captured["drop_presented"] == ("job-a", "job-b")
+
+
+@pytest.mark.parametrize("raise_on", [
+    "build_sets", "load_jobs", "retrieve", "accept", "rank", "drop",
+])
+def test_cold_start_returns_empty_on_any_pipeline_exception(
+    monkeypatch, raise_on,
+):
+    """Defensive: ANY exception in the adjacency pipeline -> log +
+    return (). Cold-start path must NEVER crash the recommender
+    turn -- the slice 2 follow-up empty-evidence guard will then
+    emit honest text."""
+    _patch_adjacency_pipeline(monkeypatch, raise_on=raise_on)
+    staged = _FakeStaged(skills=[])
+    out = _compute_adjacent_nocs_for_recommender(staged)
+    assert out == ()
+
+
+def test_cold_start_passes_staged_to_retrieve_candidates(monkeypatch):
+    """Sanity: the helper passes the staged profile through to
+    retrieve_candidates so the SSM region + target-NOC exclusion
+    logic in retrieve_candidates can use staged.target_noc."""
+    captured = _patch_adjacency_pipeline(monkeypatch, drop_returns=[])
+    staged = _FakeStaged(skills=[], target_noc="14200")
+    _compute_adjacent_nocs_for_recommender(staged)
+    assert captured["retrieve_staged"] is staged
+    # snapshot=None per the slice 4 design (no ordinal-followup lineage).
+    assert captured["retrieve_snapshot"] is None

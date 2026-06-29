@@ -319,6 +319,133 @@ def test_yes_consent_empty_layer_c_emits_honest_text_no_llm(monkeypatch):
     assert sp.last_adjacent_nocs == ()
 
 
+def test_yes_consent_cold_start_invokes_adjacency_helper(monkeypatch):
+    """Slice 4 (2026-06-26): when consume fires Layer C and
+    staged.last_adjacent_nocs is empty (cold start -- no prior
+    matching turn populated it), the dispatcher invokes
+    _compute_adjacent_nocs_for_recommender to derive adjacent NOCs
+    ephemerally. The helper's result is passed to the Layer C wrapper
+    builder; it is NOT persisted to staged.last_adjacent_nocs."""
+    sp = _make_staged(
+        pending="adjacent_noc_standard",
+        last_adjacent_nocs=(),  # cold start
+    )
+    store = _StubStore()
+
+    # Spy on the helper -- if cold-start path fires, it's called.
+    helper_calls = []
+
+    def fake_helper(staged):
+        helper_calls.append(staged)
+        return ("13110", "13100")  # two adjacent NOCs
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._compute_adjacent_nocs_for_recommender",
+        fake_helper,
+    )
+    # Stub Layer C OaSIS detector so the wrapper builds non-empty
+    # evidence from the helper's NOCs.
+    monkeypatch.setattr(
+        "skillbridge.chat.gap_evidence._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "Writing",
+             "importance": 4.5, "noc_title": "Admin assistant"},
+        ],
+    )
+    # LLM disabled so the deterministic Layer C fallback renders.
+    monkeypatch.setattr(
+        "skillbridge.chat.responder.is_enabled", lambda: False,
+    )
+
+    result = _dispatch_recommender_consume(
+        staged=sp, user_message="yes", store=store, resume_info=None,
+    )
+    assert result is not None
+    # Helper was called exactly once with the staged profile.
+    assert len(helper_calls) == 1
+    assert helper_calls[0] is sp
+    # Reply rendered Layer C content (not the empty-honest fallback).
+    assert "Nothing surfaced" not in result["reply"]
+    # Chain ends at C; flags cleared.
+    assert sp.pending_recommender_offer is None
+    # Critical lock: ephemeral derivation -- NOT persisted to staged.
+    assert sp.last_adjacent_nocs == ()
+
+
+def test_yes_consent_skips_helper_when_last_adjacent_nocs_populated(monkeypatch):
+    """Slice 4 fast path: when staged.last_adjacent_nocs is already
+    populated (from a prior matching turn), the dispatcher uses it
+    directly and does NOT call _compute_adjacent_nocs_for_recommender.
+    No wasted pipeline work."""
+    sp = _make_staged(
+        pending="adjacent_noc_standard",
+        last_adjacent_nocs=("13110", "13100"),  # populated
+    )
+    store = _StubStore()
+
+    helper_calls = []
+
+    def fake_helper(staged):
+        helper_calls.append(staged)
+        return ("UNEXPECTED",)
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._compute_adjacent_nocs_for_recommender",
+        fake_helper,
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.gap_evidence._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "Writing",
+             "importance": 4.5, "noc_title": "Admin assistant"},
+        ],
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.responder.is_enabled", lambda: False,
+    )
+
+    result = _dispatch_recommender_consume(
+        staged=sp, user_message="yes", store=store, resume_info=None,
+    )
+    assert result is not None
+    # Fast path: helper NOT called.
+    assert helper_calls == []
+
+
+def test_yes_consent_cold_start_helper_returns_empty_emits_honest_text(
+    monkeypatch,
+):
+    """Slice 4 defense: when the cold-start helper returns empty
+    (pipeline yielded no adjacency), the dispatcher falls through to
+    the slice 2 follow-up empty-evidence guard which emits
+    _LAYER_C_EMPTY_HONEST. The LLM is never called."""
+    sp = _make_staged(
+        pending="adjacent_noc_standard",
+        last_adjacent_nocs=(),
+    )
+    store = _StubStore()
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._compute_adjacent_nocs_for_recommender",
+        lambda staged: (),  # helper finds nothing
+    )
+
+    llm_called = []
+    monkeypatch.setattr(
+        "skillbridge.chat.handler.compose_response_v2",
+        lambda *a, **k: llm_called.append(True) or "HALLUCINATED",
+    )
+
+    result = _dispatch_recommender_consume(
+        staged=sp, user_message="yes", store=store, resume_info=None,
+    )
+    assert result is not None
+    assert llm_called == []
+    assert "Nothing surfaced" in result["reply"]
+    assert sp.pending_recommender_offer is None
+    assert sp.last_adjacent_nocs == ()
+
+
 def test_yes_consent_empty_layer_a_emits_honest_text_no_llm(monkeypatch):
     """Slice 2 follow-up: defensive guard for Layer A in the consent
     path. A is intent-only in the new chain, but stale cookies could
