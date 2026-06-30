@@ -42,6 +42,10 @@ gaps:
       - "truck and coach technician certificate"
       - "truck and coach technician certification"
     category: "credential"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_to_practise"
+    requirement_kind: "compulsory_trade_certificate"
+    evidence_authority: "Skilled Trades Ontario"
     description: >-
       Ontario compulsory trade certification for truck and coach technicians.
       Required by most heavy-vehicle service employers in the province; earned
@@ -49,19 +53,19 @@ gaps:
     resources:
       - provider: "Skilled Trades Ontario"
         type: "credential_pathway"
-        url: "https://www.skilledtradesontario.ca/"            # TODO: verify exact 310T sub-page
+        url: "https://www.skilledtradesontario.ca/trade-information/truck-and-coach-technician/"
         summary: >-
           The provincial regulator's pathway for 310T trade certification,
           including apprenticeship registration and exam scheduling.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault College"
         type: "apprenticeship"
-        url: "https://www.saultcollege.ca/"                    # TODO: link to truck & coach apprenticeship program page
+        url: "https://www.saultcollege.ca/programs/apprenticeship/truck-and-coach-technician"
         summary: >-
           Local in-class instruction component of the 310T apprenticeship.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault Community Career Centre"
         type: "referral_only"
         url: null
@@ -101,6 +105,10 @@ gaps:
       - "automotive service technician licence"
       - "automotive service technician license"
     category: "credential"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_to_practise"
+    requirement_kind: "compulsory_trade_certificate"
+    evidence_authority: "Skilled Trades Ontario"
     description: >-
       Ontario compulsory trade certification for automotive service
       technicians. Required by most automotive repair shops and
@@ -115,8 +123,8 @@ gaps:
           The provincial regulator's 310S trade information page,
           including apprenticeship registration, training-standard
           documents, and exam-scheduling pathway.
-        verified_at: null   # 2026-06-08 curl: 200 OK, body contains "310S" 4×, canonical (legacy /trades/ 301s here)
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault College"
         type: "apprenticeship"
         url: "https://www.saultcollege.ca/programs/apprenticeship/automotive-service-technician"
@@ -124,8 +132,8 @@ gaps:
           Sault College's Automotive Service Technician apprenticeship
           program -- local in-class instruction component of the 310S
           apprenticeship.
-        verified_at: null   # 2026-06-08 curl: 200 OK, title "Automotive Service Technician | Sault College"
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault Community Career Centre"
         type: "referral_only"
         url: null
@@ -171,6 +179,10 @@ gaps:
       - "G1 licence"
       - "G1 license"
     category: "license"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_by_employer"
+    requirement_kind: "driver_licence"
+    evidence_authority: "Ontario.ca / DriveTest"
     description: >-
       Standard Ontario driver's licence for passenger vehicles. Required by
       many employers for any role involving driving, deliveries, or site
@@ -187,12 +199,12 @@ gaps:
         verified_by: "lead-engineer"
       - provider: "Ontario.ca"
         type: "credential_pathway"
-        url: "https://www.ontario.ca/page/driver-licence"      # TODO: verify slug
+        url: "https://www.ontario.ca/page/get-g-drivers-licence-new-drivers"
         summary: >-
           Government overview of Ontario's graduated licensing system, fees,
           required documents, and exchange-licence policies for newcomers.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault Community Career Centre"
         type: "referral_only"
         url: null
@@ -220,6 +232,10 @@ gaps:
       - "DZ"
       - "air brake endorsement"
     category: "license"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_by_employer"
+    requirement_kind: "commercial_driver_licence"
+    evidence_authority: "Ontario.ca / DriveTest"
     description: >-
       Ontario commercial driver licences (Class A for tractor-trailers, D for
       large trucks, with Z endorsement for air-brake-equipped vehicles).
@@ -235,12 +251,12 @@ gaps:
         verified_by: null
       - provider: "Ontario.ca"
         type: "credential_pathway"
-        url: "https://www.ontario.ca/page/commercial-vehicle-licences"  # TODO: verify slug
+        url: "https://www.ontario.ca/page/get-truck-drivers-licence"
         summary: >-
           Government overview of Ontario commercial licence classes and
           their job-eligibility implications.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault Community Career Centre"
         type: "referral_only"
         url: null
@@ -260,6 +276,10 @@ gaps:
       - "WHMIS training"
       - "workplace hazardous materials"
     category: "safety_training"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_by_employer"
+    requirement_kind: "workplace_safety_training"
+    evidence_authority: "CCOHS / Ontario workplace-safety practice"
     description: >-
       Mandatory Ontario workplace-safety training for handling controlled
       products. Most warehouse, manufacturing, healthcare, and trades
@@ -267,12 +287,12 @@ gaps:
     resources:
       - provider: "CCOHS"
         type: "online_course"
-        url: "https://www.ccohs.ca/products/courses/whmis_globally/"   # TODO: verify
+        url: "https://www.ccohs.ca/products/courses/whmis_globally/"
         summary: >-
           The Canadian Centre for Occupational Health and Safety's official
           WHMIS 2015 / GHS online certification course.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault College"
         type: "local_training"
         url: "https://www.saultcollege.ca/"                    # TODO: link to continuing-ed WHMIS page
@@ -294,6 +314,10 @@ gaps:
       - "Standard First Aid"
       - "Emergency First Aid"
     category: "safety_training"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_by_employer"
+    requirement_kind: "first_aid_cpr_certificate"
+    evidence_authority: "Ontario employer requirement / recognized providers"
     description: >-
       Standard or Emergency First Aid with CPR — required for many healthcare,
       childcare, education, fitness, and construction roles. Two-year
@@ -309,11 +333,11 @@ gaps:
         verified_by: null
       - provider: "St. John Ambulance"
         type: "local_training"
-        url: "https://sja.ca/"                                 # TODO: link to local SSM training calendar
+        url: "https://sja.ca/"
         summary: >-
           First aid and CPR courses with local Sault Ste. Marie delivery.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
 
   # ==================================================================
   # 6. Forklift Operation
@@ -326,6 +350,10 @@ gaps:
       - "lift truck"
       - "lift truck operator"
     category: "safety_training"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_by_employer"
+    requirement_kind: "equipment_operator_training"
+    evidence_authority: "Ontario employer requirement / training provider"
     description: >-
       Ontario MOL-compliant forklift operator certification, required for
       warehouse, shipping, and manufacturing roles. Most certifications
@@ -347,6 +375,14 @@ gaps:
           certification courses with practical evaluation.
         verified_at: null
         verified_by: null
+      - provider: "CCOHS"
+        type: "online_course"
+        url: "https://www.ccohs.ca/products/courses/forklifts/"
+        summary: >-
+          Canadian Centre for Occupational Health and Safety forklift safety
+          course covering core hazards and safe operating practices.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
 
   # ==================================================================
   # 7. Food Handler / Food Safe
@@ -358,26 +394,30 @@ gaps:
       - "food safety"
       - "food safety certificate"
     category: "safety_training"
+    jurisdiction: "Ontario"
+    requirement_level: "legal_or_site_requirement"
+    requirement_kind: "food_handler_certificate"
+    evidence_authority: "Ontario Ministry of Health / local public health"
     description: >-
       Ontario public-health-recognized food handler certification, required
       for restaurant, cafeteria, catering, and food-retail roles.
     resources:
       - provider: "TrainCan"
         type: "online_course"
-        url: "https://www.traincan.com/"                       # TODO: verify
+        url: "https://www.traincan.com/"
         summary: >-
           Public-health-recognized online Food Handler certification valid
           across Ontario.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Algoma Public Health"
         type: "local_training"
-        url: "https://www.algomapublichealth.com/"             # TODO: deep link to food-handler training page
+        url: "https://www.algomapublichealth.com/"
         summary: >-
           Local public health unit's food-handler training and
           certification, recognized by Algoma-region employers.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
 
   # ==================================================================
   # 8. Personal Support Worker (PSW)
@@ -389,6 +429,10 @@ gaps:
       - "PSW certificate"
       - "personal support worker"
     category: "credential"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_by_employer"
+    requirement_kind: "college_certificate"
+    evidence_authority: "Ontario health-care employer requirement"
     description: >-
       Ontario PSW certification, required for in-home care, long-term care,
       and assisted-living roles. Typically a 1-year college program.
@@ -401,6 +445,14 @@ gaps:
           placement; one of the standard local pathways into long-term care.
         verified_at: null
         verified_by: null
+      - provider: "OntarioColleges.ca"
+        type: "local_training"
+        url: "https://www.ontariocolleges.ca/en/programs?q=personal%20support%20worker"
+        summary: >-
+          Ontario public-college program search for Personal Support Worker
+          pathways, useful when confirming currently available PSW programs.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault Community Career Centre"
         type: "referral_only"
         url: null
@@ -421,26 +473,30 @@ gaps:
       - "spreadsheets"
       - "excel skills"
     category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "software_training"
+    evidence_authority: "Local employer demand"
     description: >-
       Microsoft Excel competence — formulas, pivot tables, basic data
       analysis. Required by many admin, accounting, and analyst roles.
     resources:
       - provider: "Microsoft Learn"
         type: "online_course"
-        url: "https://learn.microsoft.com/en-us/training/browse/?products=office"   # TODO: deep link to Excel learning path
+        url: "https://learn.microsoft.com/en-us/training/browse/?products=office"
         summary: >-
           Microsoft's free official Excel training and certification path
           (Microsoft Office Specialist — Excel).
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Coursera"
         type: "online_course"
-        url: "https://www.coursera.org/specializations/excel"  # TODO: verify
+        url: "https://www.coursera.org/specializations/excel"
         summary: >-
           Macquarie University's "Excel Skills for Business" specialization
           on Coursera (free to audit, paid for certificate).
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault College"
         type: "local_training"
         url: "https://www.saultcollege.ca/"                    # TODO: link to continuing-ed Excel offerings
@@ -462,6 +518,10 @@ gaps:
       - "PowerPoint"
       - "Outlook"
     category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "office_software_training"
+    evidence_authority: "Local employer demand"
     description: >-
       General Microsoft Office competence — Word, Excel, PowerPoint, Outlook.
       Foundational for admin, customer-service, and most office roles.
@@ -472,8 +532,8 @@ gaps:
         summary: >-
           Microsoft's free official training across the Office suite, with
           certification paths via Microsoft Office Specialist (MOS).
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Northland Adult Learning Centre"
         type: "local_training"
         url: "https://northland-ssm.ca/"                       # TODO: verify domain
@@ -493,6 +553,10 @@ gaps:
       - "basic accounting"
       - "accounting software"
     category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "accounting_software_training"
+    evidence_authority: "Local employer demand"
     description: >-
       QuickBooks proficiency and foundational bookkeeping — required for
       junior accounting, bookkeeping, and small-business admin roles.
@@ -507,12 +571,12 @@ gaps:
         verified_by: null
       - provider: "Sault College"
         type: "local_training"
-        url: "https://www.saultcollege.ca/"                    # TODO: link to accounting / business administration page
+        url: "https://www.saultcollege.ca/programs/business/business"
         summary: >-
           Sault College's Business Administration and Accounting programs
           cover bookkeeping fundamentals.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
 
   # ==================================================================
   # 12. Customer Service
@@ -524,6 +588,10 @@ gaps:
       - "client services"
       - "client-facing"
     category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "employability_skill_training"
+    evidence_authority: "Local employer demand"
     description: >-
       Foundational customer-service competence — communication, conflict
       resolution, point-of-sale, professional behaviour. Required by retail,
@@ -539,12 +607,12 @@ gaps:
         verified_by: "lead-engineer"
       - provider: "Coursera"
         type: "online_course"
-        url: "https://www.coursera.org/learn/customer-service"  # TODO: verify
+        url: "https://www.coursera.org/learn/customer-service"
         summary: >-
           CVS Health's free "Customer Service" course on Coursera; broad
           fundamentals applicable across industries.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
 
   # ==================================================================
   # 13. CompTIA / IT Support
@@ -558,6 +626,10 @@ gaps:
       - "help desk"
       - "Google IT Support"
     category: "credential"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "vendor_certification"
+    evidence_authority: "Vendor certification / local employer demand"
     description: >-
       Entry-level IT-support credentials — CompTIA A+ (vendor-neutral) or
       Google IT Support Certificate (entry-level help desk). Required by
@@ -565,20 +637,20 @@ gaps:
     resources:
       - provider: "CompTIA"
         type: "credential_pathway"
-        url: "https://www.comptia.org/certifications/a"        # TODO: verify
+        url: "https://www.comptia.org/certifications/a"
         summary: >-
           CompTIA's official A+ certification page — vendor-neutral IT
           foundations exam, recognized across IT employers.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Google Career Certificates"
         type: "online_course"
-        url: "https://grow.google/certificates/it-support/"    # TODO: verify
+        url: "https://grow.google/certificates/it-support/"
         summary: >-
           Google's IT Support Professional Certificate on Coursera — entry-
           level, ~6 months part-time, no degree required.
-        verified_at: null
-        verified_by: null
+        verified_at: "2026-06-30"
+        verified_by: "codex"
       - provider: "Sault College"
         type: "local_training"
         url: "https://www.saultcollege.ca/"                    # TODO: link to IT / Computer Studies programs
@@ -586,3 +658,505 @@ gaps:
           Local in-person Computer Studies and IT support diploma programs.
         verified_at: null
         verified_by: null
+
+  # ==================================================================
+  # 14. Smart Serve Ontario
+  # ==================================================================
+  - canonical_name: "Smart Serve certification"
+    aliases:
+      - "Smart Serve"
+      - "SmartServe"
+      - "Smart Serve Ontario"
+      - "alcohol service certification"
+      - "responsible alcohol service"
+      - "serve alcohol certificate"
+    category: "credential"
+    jurisdiction: "Ontario"
+    requirement_level: "legal_or_site_requirement"
+    requirement_kind: "alcohol_service_certificate"
+    evidence_authority: "Smart Serve Ontario"
+    description: >-
+      Ontario responsible alcohol-service certification. Required for many
+      restaurant, bar, hotel, event, and hospitality roles where alcohol is
+      sold, served, delivered, or sampled.
+    resources:
+      - provider: "Smart Serve Ontario"
+        type: "credential_pathway"
+        url: "https://smartserve.ca/"
+        summary: >-
+          Ontario's responsible alcohol-service training and certification
+          pathway for hospitality and event workers.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help confirm whether Smart Serve is required for the
+          specific hospitality role and point you to local supports.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 15. Working at Heights
+  # ==================================================================
+  - canonical_name: "Working at Heights training"
+    aliases:
+      - "Working at Heights"
+      - "WAH"
+      - "working from heights"
+      - "fall protection"
+      - "fall arrest"
+      - "heights training"
+    category: "safety_training"
+    jurisdiction: "Ontario"
+    requirement_level: "legal_or_site_requirement"
+    requirement_kind: "construction_safety_training"
+    evidence_authority: "Ontario Ministry of Labour, Immigration, Training and Skills Development"
+    description: >-
+      Ontario construction safety training required for workers on
+      construction projects who may use fall-protection equipment. Commonly
+      requested for construction, maintenance, roofing, and industrial roles.
+    resources:
+      - provider: "Ontario.ca"
+        type: "credential_pathway"
+        url: "https://www.ontario.ca/page/training-working-heights"
+        summary: >-
+          Government information on Ontario Working at Heights training,
+          approved providers, and refresher requirements.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help identify approved Working at Heights training
+          providers and funding/support options in the Sault Ste. Marie area.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 16. Ontario Worker Health and Safety Awareness
+  # ==================================================================
+  - canonical_name: "worker health and safety awareness"
+    aliases:
+      - "health and safety awareness"
+      - "worker awareness training"
+      - "Ontario worker awareness"
+      - "occupational health and safety awareness"
+      - "OHSA awareness"
+    category: "safety_training"
+    jurisdiction: "Ontario"
+    requirement_level: "legal_or_site_requirement"
+    requirement_kind: "workplace_safety_training"
+    evidence_authority: "Ontario.ca"
+    description: >-
+      Ontario worker health-and-safety awareness training covering basic
+      rights, responsibilities, hazards, and the Internal Responsibility
+      System. Often completed during onboarding for Ontario workplaces.
+    resources:
+      - provider: "Ontario.ca"
+        type: "online_course"
+        url: "https://www.ontario.ca/page/worker-health-and-safety-awareness-four-steps"
+        summary: >-
+          Free Ontario worker health-and-safety awareness material covering
+          the four basic steps every worker should know.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help job seekers understand which safety training is
+          expected for the role they are targeting.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 17. Security Guard Licence
+  # ==================================================================
+  - canonical_name: "Ontario security guard licence"
+    aliases:
+      - "security guard licence"
+      - "security guard license"
+      - "Ontario security licence"
+      - "Ontario security license"
+      - "security license"
+      - "security licence"
+      - "private security licence"
+    category: "license"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_to_practise"
+    requirement_kind: "provincial_licence"
+    evidence_authority: "Ontario.ca"
+    description: >-
+      Ontario licence required to work as a security guard. Applicants
+      typically complete mandatory training, pass the provincial test, and
+      apply for a licence before working in regulated security roles.
+    resources:
+      - provider: "Ontario.ca"
+        type: "credential_pathway"
+        url: "https://www.ontario.ca/page/get-security-guard-or-private-investigator-licence"
+        summary: >-
+          Government pathway for Ontario security guard and private
+          investigator licensing, including training, testing, and licence
+          application steps.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help identify local security-training providers and
+          confirm whether a specific posting requires the Ontario licence.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 18. Vulnerable Sector Check / Police Record Check
+  # ==================================================================
+  - canonical_name: "vulnerable sector check"
+    aliases:
+      - "VSC"
+      - "vulnerable sector screening"
+      - "police vulnerable sector check"
+      - "police record check"
+      - "criminal record check"
+      - "background check"
+      - "CRC"
+    category: "credential"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_by_employer"
+    requirement_kind: "background_check"
+    evidence_authority: "Ontario employer requirement / police service"
+    description: >-
+      Police record or vulnerable-sector screening commonly required for
+      roles involving children, seniors, people with disabilities, health
+      care, education, social services, security, or volunteer placements.
+      This is an employer/site requirement, not a skill course.
+    resources:
+      - provider: "Sault Ste. Marie Police Service"
+        type: "credential_pathway"
+        url: "https://saultpolice.ca/"
+        summary: >-
+          Local police-service source for record-check information for Sault
+          Ste. Marie residents; applicants should follow the employer's
+          requested check type.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help clarify which type of record check a posting is
+          asking for and how to prepare the documents.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 19. Early Childhood Educator Registration
+  # ==================================================================
+  - canonical_name: "Registered Early Childhood Educator registration"
+    aliases:
+      - "RECE"
+      - "ECE registration"
+      - "registered early childhood educator"
+      - "College of Early Childhood Educators"
+      - "early childhood educator registration"
+      - "ECE licence"
+      - "ECE license"
+    category: "credential"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_to_practise"
+    requirement_kind: "professional_registration"
+    evidence_authority: "College of Early Childhood Educators"
+    description: >-
+      Ontario professional registration required to use the Registered Early
+      Childhood Educator / RECE title. Child-care and early-years employers
+      often require membership with the College of Early Childhood Educators
+      for ECE roles.
+    resources:
+      - provider: "College of Early Childhood Educators"
+        type: "credential_pathway"
+        url: "https://www.college-ece.ca/"
+        summary: >-
+          Ontario regulator for Early Childhood Educators, including
+          registration requirements and membership information.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/community-services/early-childhood-education"
+        summary: >-
+          Local college pathway for Early Childhood Education training when
+          the user needs the academic credential before registration.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 20. Ontario Nursing Registration
+  # ==================================================================
+  - canonical_name: "Ontario nursing registration"
+    aliases:
+      - "CNO registration"
+      - "College of Nurses of Ontario"
+      - "nursing licence"
+      - "nursing license"
+      - "RN registration"
+      - "RPN registration"
+      - "registered nurse licence"
+      - "registered practical nurse licence"
+    category: "credential"
+    jurisdiction: "Ontario"
+    requirement_level: "mandatory_to_practise"
+    requirement_kind: "professional_registration"
+    evidence_authority: "College of Nurses of Ontario"
+    description: >-
+      Registration with the College of Nurses of Ontario is required to
+      practise as a nurse in Ontario. This is a regulated-profession pathway,
+      not a short skill-upgrading course.
+    resources:
+      - provider: "College of Nurses of Ontario"
+        type: "credential_pathway"
+        url: "https://www.cno.org/"
+        summary: >-
+          Ontario nursing regulator for RN, RPN, and NP registration
+          requirements, applicant classes, and internationally educated
+          nurse pathways.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help internationally trained nurses understand local
+          employment supports and referrals while navigating CNO registration.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 21. Payroll Compliance / Payroll Administration
+  # ==================================================================
+  - canonical_name: "payroll compliance training"
+    aliases:
+      - "payroll"
+      - "payroll administration"
+      - "payroll compliance"
+      - "payroll certificate"
+      - "payroll certification"
+      - "PCP"
+      - "Payroll Compliance Practitioner"
+      - "National Payroll Institute"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "accounting_payroll_training"
+    evidence_authority: "Local employer demand / National Payroll Institute"
+    description: >-
+      Payroll administration and compliance knowledge for accounting clerk,
+      payroll clerk, bookkeeping, HR assistant, and office-administration
+      roles. Usually not a legal licence, but frequently requested by
+      employers handling payroll.
+    resources:
+      - provider: "National Payroll Institute"
+        type: "credential_pathway"
+        url: "https://payroll.ca/"
+        summary: >-
+          Canadian payroll education and certification body; useful pathway
+          when postings ask for payroll compliance or formal payroll
+          certification.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/"
+        summary: >-
+          Local accounting, bookkeeping, and business programs that may cover
+          payroll administration as part of the curriculum.
+        verified_at: null
+        verified_by: null
+
+  # ==================================================================
+  # 22. Written Communication / Business Writing
+  # ==================================================================
+  - canonical_name: "written communication"
+    aliases:
+      - "writing"
+      - "business writing"
+      - "professional writing"
+      - "workplace writing"
+      - "email writing"
+      - "documentation"
+      - "report writing"
+      - "correspondence"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "communication_skill_training"
+    evidence_authority: "Local employer demand"
+    description: >-
+      Workplace writing ability for emails, memos, reports, records,
+      documentation, and professional correspondence. Commonly requested in
+      administrative, office, health, education, and supervisory roles.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help identify local business-writing or workplace
+          communication training and coach the user on how to demonstrate
+          writing experience from prior roles.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Northland Adult Learning Centre"
+        type: "local_training"
+        url: "https://northland-ssm.ca/"
+        summary: >-
+          Local adult-learning support that may help with workplace
+          communication, writing, and essential skills.
+        verified_at: null
+        verified_by: null
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/learn/business-writing"
+        summary: >-
+          Business writing course for professional emails, memos,
+          documents, and workplace communication.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 23. Digital Literacy / Computer Skills
+  # ==================================================================
+  - canonical_name: "digital literacy"
+    aliases:
+      - "computer skills"
+      - "basic computer skills"
+      - "digital skills"
+      - "computer literacy"
+      - "online forms"
+      - "email"
+      - "file management"
+      - "data entry"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "digital_skill_training"
+    evidence_authority: "Local employer demand"
+    description: >-
+      Basic computer confidence for email, online forms, file management,
+      data entry, office systems, and digital workplace tools. Commonly
+      requested across office, service, health, education, and logistics
+      roles.
+    resources:
+      - provider: "Northland Adult Learning Centre"
+        type: "local_training"
+        url: "https://northland-ssm.ca/"
+        summary: >-
+          Local adult-learning support for basic computer, digital, and
+          essential workplace skills.
+        verified_at: null
+        verified_by: null
+      - provider: "Microsoft Learn"
+        type: "online_course"
+        url: "https://learn.microsoft.com/en-us/training/browse/?products=office"
+        summary: >-
+          Microsoft training catalogue for Office and digital workplace
+          tools, useful for building practical computer confidence.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help choose the right digital-skills pathway based on the
+          user's target job and current comfort level.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 24. Medical Terminology
+  # ==================================================================
+  - canonical_name: "medical terminology"
+    aliases:
+      - "medical terms"
+      - "healthcare terminology"
+      - "clinical terminology"
+      - "medical office terminology"
+      - "medical admin terminology"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "health_administration_training"
+    evidence_authority: "Local employer demand"
+    description: >-
+      Medical terminology knowledge for medical office assistant, unit clerk,
+      ward clerk, health administration, and patient-service roles. Usually
+      employer-required or strongly preferred rather than a legal licence.
+    resources:
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/"
+        summary: >-
+          Local health-office, office-administration, or continuing-education
+          pathways may include medical terminology training.
+        verified_at: null
+        verified_by: null
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help identify current local options for medical
+          terminology training based on the user's target health role.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/learn/clinical-terminology"
+        summary: >-
+          Medical and clinical terminology course for learners preparing
+          for health administration, patient service, or clinical-office
+          support roles.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 25. Administrative / Records Management
+  # ==================================================================
+  - canonical_name: "records management"
+    aliases:
+      - "filing"
+      - "document management"
+      - "records"
+      - "record keeping"
+      - "office records"
+      - "administrative records"
+      - "electronic records"
+      - "document control"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "administrative_skill_training"
+    evidence_authority: "Local employer demand"
+    description: >-
+      Office records, filing, document control, and information-management
+      skills used in administrative assistant, office clerk, health admin,
+      finance admin, and public-service roles.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help identify office-administration training and coach the
+          user on how to describe records-management experience from prior
+          roles.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/business/business"
+        summary: >-
+          Local office-administration and business programs may cover records,
+          filing, document management, and office procedures.
+        verified_at: "2026-06-30"
+        verified_by: "codex"

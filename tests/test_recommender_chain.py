@@ -71,10 +71,15 @@ def _make_staged(
 # Module-level invariants
 # ===========================================================================
 def test_valid_modes_are_locked_set():
+    """Slice 5 (2026-06-29): the cookie-side valid set includes the
+    pending-only state adjacent_role_drilldown_select. The handler's
+    _VALID_RECOMMENDER_RESPONSE_MODES subset (not tested here) is
+    what excludes the pending-only state from intent dispatch."""
     assert _VALID_RECOMMENDER_MODES == frozenset({
         "local_gap_coach",
         "target_noc_standard",
         "adjacent_noc_standard",
+        "adjacent_role_drilldown_select",
     })
 
 
@@ -250,10 +255,16 @@ def test_yes_at_target_mode_ends_chain(monkeypatch):
     assert sp.last_adjacent_nocs == ()
 
 
-def test_yes_at_adjacent_mode_ends_chain_and_clears_last_adjacent(monkeypatch):
-    """When the user yes-consents at adjacent_noc_standard, the chain
-    ENDS HERE: pending_recommender_offer is set to None and the
-    last_adjacent_nocs cache is cleared."""
+def test_yes_at_adjacent_mode_advances_to_drilldown_select(monkeypatch):
+    """Slice 5 (2026-06-29) UPDATE: when the user yes-consents at
+    adjacent_noc_standard AND the wrapper builds non-empty evidence,
+    the chain transitions to drilldown_select (pending) and the
+    surface snapshot is populated. The chain effectively continues
+    one more step (user can now pick which adjacent NOC to drill
+    into).
+
+    Pre-slice-5 behavior: pending was set to None (chain ends).
+    That's now reserved for the empty-evidence path."""
     sp = _make_staged(
         pending="adjacent_noc_standard",
         last_adjacent_nocs=("13110",),
@@ -273,8 +284,12 @@ def test_yes_at_adjacent_mode_ends_chain_and_clears_last_adjacent(monkeypatch):
         staged=sp, user_message="yes", store=store, resume_info=None,
     )
     assert result is not None
-    assert sp.pending_recommender_offer is None  # chain ends
-    assert sp.last_adjacent_nocs == ()  # cache cleared
+    # Slice 5: transitions to drilldown_select; surface populated.
+    assert sp.pending_recommender_offer == "adjacent_role_drilldown_select"
+    assert len(sp.last_recommender_adjacent_surface) > 0
+    # last_adjacent_nocs preserved (matching-engine sideways tier
+    # readers may still need it; slice 5 doesn't touch it).
+    assert sp.last_adjacent_nocs == ("13110",)
 
 
 def test_yes_consent_empty_layer_c_emits_honest_text_no_llm(monkeypatch):
@@ -366,9 +381,13 @@ def test_yes_consent_cold_start_invokes_adjacency_helper(monkeypatch):
     assert helper_calls[0] is sp
     # Reply rendered Layer C content (not the empty-honest fallback).
     assert "Nothing surfaced" not in result["reply"]
-    # Chain ends at C; flags cleared.
-    assert sp.pending_recommender_offer is None
-    # Critical lock: ephemeral derivation -- NOT persisted to staged.
+    # Slice 5 (2026-06-29): after Layer C renders with content, the
+    # pending state switches to drilldown_select so the next-turn
+    # user selection routes to drilldown. Surface is populated.
+    assert sp.pending_recommender_offer == "adjacent_role_drilldown_select"
+    assert len(sp.last_recommender_adjacent_surface) > 0
+    # last_adjacent_nocs still empty (helper result was ephemeral,
+    # never persisted to that field per slice 4 lock).
     assert sp.last_adjacent_nocs == ()
 
 

@@ -1141,14 +1141,20 @@ def compose_response_v2(inp: ResponderV2Input) -> str:
     ):
         return _TRAINING_REQUEST_NO_ENTITY_QUESTION
 
-    # present_no_match always routes through the LLM happy path now
-    # (no-final-no-without-resume rule, 2026-06-16). The OUTCOME_
-    # RESPONDER_PROMPT teaches the LLM TWO no-match shapes based on
-    # `RESUME_UPLOAD_OFFER`: an iterative-ask shape when the offer is
-    # active (no resume yet) and an honest-final-close shape when no
-    # offer is active (resume uploaded). The deterministic fallback
-    # at `_present_no_match_fallback_v2` remains the safety net if
-    # the LLM call fails or its output is rejected by the policy gate.
+    # Slice 6 (locked 2026-06-29, Option 1): LLM bypass for
+    # present_no_match. The LLM has drifted repeatedly on this
+    # surface ("I checked related roles" when recommender never
+    # ran; "want training directions?" with no consume hook;
+    # Sault College hallucinations caught by policy gate). The
+    # deterministic _present_no_match_fallback_v2 is now the
+    # SOURCE OF TRUTH for no_match responses, not just a safety
+    # net. Skip the LLM entirely for this final_move.
+    #
+    # Resume-upload-offer branch within the fallback still fires
+    # for no-resume cases (that's a distinct UX flow with its own
+    # consume hook -- user uploads resume next turn).
+    if inp.decision.final_move == "present_no_match":
+        return _present_no_match_fallback_v2(inp)
 
     # AR-9.feat.coach-tiers CP2 step 3: tiered-matches surface uses its
     # own view builder, prompt, policy gate, and fallback. The
@@ -2763,97 +2769,40 @@ def _present_no_match_fallback_v2(inp: ResponderV2Input) -> str:
         )
         return msg
 
-    # Step 9 → Step 11g (SHAPE 2 enhanced + RELATED_ROLES_EXHAUSTED,
-    # 2026-06-17): when the no-match branch fires without a resume-
-    # upload offer — meaning resume IS already uploaded AND adjacency
-    # returned nothing AND we're at the absolute bottom of the closing
-    # matrix — render the 3-movement structure that matches Step 11f's
-    # prompt rule for the LLM happy path. Symmetric fallback: when the
-    # LLM is disabled / fails policy and we drop here, the user sees
-    # the same coherent shape they would have gotten from the LLM.
+    # Slice 6 (locked 2026-06-29, Option 1 narrow text-only unlock):
+    # the matching engine's no-match response was REPEATEDLY making
+    # false claims and hollow offers ("I checked for related roles"
+    # when the recommender was never invoked; "Want training
+    # directions?" with no consume hook). Live verify caught this
+    # multiple times -- including with the existing policy gate
+    # rejecting the LLM and the deterministic fallback ALSO emitting
+    # the same offers.
     #
-    # 3-movement structure (LOCKED 2026-06-17 by Nazmul):
-    #   A: acknowledgment — "I checked for related roles but didn't
-    #      find any other postings your background fits right now."
-    #   B: market panorama — total_active_jobs + top sectors + top
-    #      employers, from PIPELINE_SNAPSHOT.
-    #   C: training-offer close — defer specific training to the
-    #      next turn (Step 10 will fire CP4 when user consents).
-    snap = inp.pipeline_snapshot
-    if snap is not None and snap.total_active_jobs > 0 and (
-        snap.top_sectors or snap.top_employers
-    ):
-        # MOVEMENT A — acknowledge the related-roles search ran.
-        # Replaces the generic "I don't see a fit" that read as
-        # "the system never tried" — Pattern 2 yes-consent / Pattern
-        # 3 auto-fire ALREADY tried the adjacency lookup.
-        msg = (
-            "I checked for related roles but didn't find any other "
-            "postings your background fits right now. "
+    # Locked replacement: minimal 2-sentence honest text. Absence
+    # statement + SCCC referral. NO related-role claim, NO training
+    # offer, NO "do you want?" dead-end, NO market panorama
+    # (total_active_jobs / top_sectors / top_employers were editorial
+    # padding that contributed nothing to the user's accounting-clerk
+    # question and added more drift surface).
+    #
+    # Also LLM bypass for present_no_match (see compose_response_v2)
+    # -- this fallback is now the SOURCE OF TRUTH for no_match
+    # responses, not just the safety net.
+    target = (inp.target_role_text or "").strip()
+    if target:
+        absence = (
+            f"I don't see any {target} postings in Sault Ste. Marie "
+            f"today."
         )
-
-        # MOVEMENT B — market context: count + top sectors when available.
-        sector_phrase = _format_top_sectors_phrase(snap.top_sectors)
-        if sector_phrase:
-            msg += (
-                f"Right now there are {snap.total_active_jobs} active "
-                f"postings in Sault Ste. Marie — {sector_phrase}. "
-            )
-        else:
-            msg += (
-                f"Right now there are {snap.total_active_jobs} active "
-                f"postings in Sault Ste. Marie. "
-            )
-        # Concrete employer names the user can recognize.
-        employer_phrase = _format_top_employers_phrase(snap.top_employers)
-        if employer_phrase:
-            msg += f"{employer_phrase} "
-
-        # MOVEMENT C — 3 sub-movements: skill ack + gap callout +
-        # training-direction close. Step 11h: the LLM happy path
-        # is the canonical path (gets to pick which skills to name
-        # from RESUME_FACTS, weave them naturally); the fallback
-        # uses a SIMPLER form because hand-templating skill name
-        # selection out of resume_facts in plain Python would read
-        # robotically. The fallback's degradation is acceptable —
-        # it's the safety net for when the LLM fails policy.
-        #
-        # C1 (skill ack): omitted in the fallback (safe omission
-        #   beats robotic enumeration of every staged skill).
-        # C2 (gap callout): when inp.cp4_primary_gap is set, name
-        #   it verbatim as "the one thing that came up."
-        # C3 (training-direction close): the locked phrasing from
-        #   the user spec.
-        if inp.cp4_primary_gap:
-            msg += (
-                f"The one thing that came up is "
-                f"{inp.cp4_primary_gap}. "
-            )
-        msg += (
-            "If you want to improve your skills gap, I can help to "
-            "give some training directions. Do you want?"
+    else:
+        absence = (
+            "I don't see matching postings in Sault Ste. Marie today."
         )
-        return msg
-
-    # Fallback (no snapshot, empty dataset, or snapshot missing sector
-    # / employer data): preserve the v1 SHAPE 2 honest close. The
-    # user-always-gets-something principle still applies (SCCC
-    # referral is a meaningful next step), just without the market
-    # panorama enhancement.
-    msg = (
-        "I don't see one in today's Sault Ste. Marie postings. "
+    referral = (
+        "The Sault Community Career Centre has access to more "
+        "sources and can flag openings as they come up."
     )
-    if skill and count:
-        msg += (
-            f"If you build {skill}, around {count} more current jobs "
-            "could open up. "
-        )
-    msg += (
-        "I'd recommend reaching out to Sault Community Career Centre — "
-        "they have access to more sources and can flag openings as "
-        "they come in."
-    )
-    return msg
+    return f"{absence} {referral}"
 
 
 def _format_top_sectors_phrase(top_sectors: tuple[str, ...]) -> str:

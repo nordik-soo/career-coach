@@ -530,7 +530,24 @@ def _classify_pattern_2_reply(message: str) -> str:
 # Slice 5 step 4 (2026-06-19): conversational recommender chain
 # consume dispatch. See project_recommender_step4_implementation_lock
 # memory for the locked design.
+#
+# Slice 5 NEW slice (2026-06-29): adjacent_role_drilldown_select added
+# as a pending-state value. NOT a response mode -- it's the routing
+# signal used while the user is choosing which adjacent NOC to drill
+# into. The actual drilldown render dispatches via a separate path
+# (RoleDrilldownEvidence) so the response-mode dispatch in the
+# responder doesn't need to know about it.
 _VALID_RECOMMENDER_MODES: frozenset[str] = frozenset({
+    "local_gap_coach",
+    "target_noc_standard",
+    "adjacent_noc_standard",
+    "adjacent_role_drilldown_select",
+})
+
+# Subset that intent-driven + consent-driven dispatchers map to
+# response modes. Excludes pending-only states like
+# adjacent_role_drilldown_select.
+_VALID_RECOMMENDER_RESPONSE_MODES: frozenset[str] = frozenset({
     "local_gap_coach",
     "target_noc_standard",
     "adjacent_noc_standard",
@@ -603,6 +620,18 @@ def _dispatch_recommender_consume(
         # Defensive: a forged or stale flag value clears safely.
         staged.pending_recommender_offer = None
         return None
+
+    # Slice 5 (2026-06-29): adjacent_role_drilldown_select pending
+    # state has its OWN consume flow -- resolver first, consent
+    # second -- not the standard yes/no/other branch below. Dispatch
+    # to the drilldown consume handler and return its verdict.
+    if mode == "adjacent_role_drilldown_select":
+        return _consume_drilldown_selection(
+            staged=staged,
+            user_message=user_message,
+            store=store,
+            resume_info=resume_info,
+        )
 
     consent = _classify_recommender_consent(user_message)
     log.info(
@@ -806,15 +835,329 @@ def _dispatch_recommender_consume(
     reply = compose_response_v2(inp)
 
     # Advance the chain.
-    next_mode = _RECOMMENDER_NEXT_MODE[mode]
-    staged.pending_recommender_offer = next_mode
-    if next_mode is None:
-        # Chain ENDS here. Clear the per-target Layer C cache.
-        staged.last_adjacent_nocs = ()
+    # Slice 5 (2026-06-29): Layer C consent-render also populates the
+    # drilldown surface + switches pending to drilldown_select (same
+    # as the intent-driven Layer C path).
+    if mode == "adjacent_noc_standard" and rec_evidence.evidence:
+        _populate_recommender_adjacent_surface(staged, rec_evidence)
+        staged.pending_recommender_offer = "adjacent_role_drilldown_select"
+    else:
+        next_mode = _RECOMMENDER_NEXT_MODE[mode]
+        staged.pending_recommender_offer = next_mode
+        if next_mode is None:
+            # Chain ENDS here. Clear the per-target Layer C cache.
+            staged.last_adjacent_nocs = ()
     staged.touch()
     new_session_id = store.save(staged)
     return {
         "reply": reply,
+        "profile_id": None,
+        "session_id": new_session_id,
+        "intake_state": staged.intake_state,
+        "asked_slots": [],
+        "next_action": intake_state.ACTION_PRESENT_MATCHES,
+        "recommended_jobs": [],
+        "next_skill_suggestion": None,
+        "resume_info": resume_info,
+        "requires_consent": True,
+    }
+
+
+# =========================================================================
+# Slice 5 (2026-06-29) -- role drilldown helpers
+# =========================================================================
+def _populate_recommender_adjacent_surface(
+    staged: StagedProfile,
+    rec_evidence: Any,
+) -> None:
+    """Slice 5: extract NOC code + title pairs from a Layer C
+    RecommenderEvidence wrapper and persist them on staged as the
+    adjacent surface snapshot. Caps at 3 entries (mirrors the
+    sanitizer cap).
+
+    Used by both intent-driven and consent-driven Layer C render
+    paths -- both must populate so the next-turn selection resolver
+    can map "the second one" / "admin secretary" / "13110" back to
+    a NOC code.
+
+    The Layer C wrapper's evidence tuple has GapEvidence rows whose
+    source_id is the NOC code and source_label is the OaSIS NOC
+    title. Group by source_id to get the per-NOC titles -- multiple
+    rows share the same NOC.
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for g in getattr(rec_evidence, "evidence", ()):
+        noc = getattr(g, "source_id", None)
+        title = getattr(g, "source_label", None)
+        if not isinstance(noc, str) or not isinstance(title, str):
+            continue
+        code = noc.strip()
+        title_clean = title.strip()
+        if not code or not title_clean or code in seen:
+            continue
+        seen.add(code)
+        out.append({"noc_code": code, "title": title_clean})
+        if len(out) >= 3:
+            break
+    staged.last_recommender_adjacent_surface = tuple(out)
+
+
+def _consume_drilldown_selection(
+    *,
+    staged: StagedProfile,
+    user_message: str,
+    store,
+    resume_info: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Slice 5: consume hook for pending_recommender_offer ==
+    "adjacent_role_drilldown_select".
+
+    Resolver-first / consent-second ordering (locked design):
+      1. Try _resolve_drilldown_selection against
+         staged.last_recommender_adjacent_surface. Hit -> dispatch
+         drilldown for that NOC. (Keep pending + surface so user
+         can pick another.)
+      2. Resolver missed -> consent classifier:
+           consent=="no" / decline: ack + CLEAR pending + surface
+           consent=="yes" (ambiguous): re-prompt with options
+           consent=="other": user pivoted to something else;
+                             CLEAR pending + surface, return None
+                             so main router takes over.
+    """
+    from skillbridge.chat.recommender_assembly import (
+        resolve_drilldown_selection,
+    )
+    surface = staged.last_recommender_adjacent_surface or ()
+    selected = resolve_drilldown_selection(user_message, surface)
+    if selected is not None:
+        return _dispatch_role_drilldown(
+            staged=staged,
+            noc_code=selected["noc_code"],
+            role_title=selected["title"],
+            store=store,
+            resume_info=resume_info,
+            user_message=user_message,
+        )
+
+    # Resolver missed -> consent fallback.
+    consent = _classify_recommender_consent(user_message)
+    log.info(
+        "anon_chat session=%s drilldown_selection_consent=%s",
+        staged.session_id[:8], consent,
+    )
+
+    if consent == "no":
+        # User declined the drilldown offer entirely.
+        staged.pending_recommender_offer = None
+        staged.last_recommender_adjacent_surface = ()
+        staged.touch()
+        new_session_id = store.save(staged)
+        return {
+            "reply": (
+                "Got it -- let me know if you want to revisit those "
+                "related roles."
+            ),
+            "profile_id": None,
+            "session_id": new_session_id,
+            "intake_state": staged.intake_state,
+            "asked_slots": [],
+            "next_action": intake_state.ACTION_ACKNOWLEDGE_AND_WAIT,
+            "recommended_jobs": [],
+            "next_skill_suggestion": None,
+            "resume_info": resume_info,
+            "requires_consent": True,
+        }
+
+    if consent == "yes":
+        # Ambiguous yes -- re-prompt with the surfaced options.
+        from skillbridge.chat.recommender_fallback import (
+            render_role_drilldown_reprompt,
+        )
+        reply = render_role_drilldown_reprompt(surface)
+        staged.touch()
+        new_session_id = store.save(staged)
+        return {
+            "reply": reply,
+            "profile_id": None,
+            "session_id": new_session_id,
+            "intake_state": staged.intake_state,
+            "asked_slots": [],
+            "next_action": intake_state.ACTION_PRESENT_MATCHES,
+            "recommended_jobs": [],
+            "next_skill_suggestion": None,
+            "resume_info": resume_info,
+            "requires_consent": True,
+        }
+
+    # consent == "other": user pivoted to a different intent
+    # (matching, training, anything else). CLEAR drilldown state
+    # so main router takes over with fresh classification.
+    staged.pending_recommender_offer = None
+    staged.last_recommender_adjacent_surface = ()
+    staged.touch()
+    store.save(staged)
+    return None  # falls through to normal flow
+
+
+def _dispatch_role_drilldown(
+    *,
+    staged: StagedProfile,
+    noc_code: str,
+    role_title: str,
+    store,
+    resume_info: dict[str, Any] | None,
+    user_message: str,
+) -> dict[str, Any] | None:
+    """Slice 5: render the side-by-side OaSIS-vs-resume comparison
+    table for a chosen adjacent NOC.
+
+    Per the locked design:
+      - The TABLE is rendered DETERMINISTICALLY by Python (via
+        render_role_drilldown_table). The LLM only writes a short
+        close that's appended AFTER the table.
+      - Empty OaSIS profile -> honest fallback canned text. No
+        empty table.
+      - Pending + surface STAY ALIVE after a successful render so
+        the user can pick another role from the same surface
+        ("now the second one"). They only clear on decline / pivot
+        / target change.
+    """
+    from datetime import date
+    from skillbridge.chat.recommender_assembly import (
+        build_recommender_evidence_role_drilldown,
+    )
+    from skillbridge.chat.recommender_fallback import (
+        render_role_drilldown_table,
+        render_role_drilldown_empty_fallback,
+    )
+    from skillbridge.match.engine import (
+        build_user_skill_rows,
+        derive_user_skill_sets,
+    )
+
+    user_rows = build_user_skill_rows(staged.skills)
+    user_skill_ids, user_skill_names, user_skill_canon = (
+        derive_user_skill_sets(user_rows)
+    )
+    # Slice 8 hardening (2026-06-30): UserSkillRow is a dataclass
+    # with attributes .text / .name / .canon (NOT a dict). The
+    # earlier slice 5/7a/8 code used .get("skill_name") /
+    # .get("canonical") which returned None for everything --
+    # name_to_canon was silently empty since slice 5. Fix: read
+    # attributes from the dataclass.
+    name_to_canon: dict[str, str] = {}
+    for r in user_rows:
+        raw = getattr(r, "text", None)
+        canon = getattr(r, "canon", None)
+        if isinstance(raw, str) and isinstance(canon, str):
+            name_to_canon[raw] = canon
+
+    registry = None
+    if TRAINING_REGISTRY_ENABLED:
+        try:
+            from skillbridge.training.registry import get_registry
+            registry = get_registry()
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "role_drilldown_dispatch registry_load_failed; "
+                "training column will be ask-SCCC for all gaps",
+            )
+            registry = None
+
+    # Slice 8 hardening (2026-06-30): pass work_history / education
+    # / certifications as EXPLICIT kwargs (replaces the unsafe
+    # module-level _DRILLDOWN_USER_CONTEXT shim). The LLM judgment
+    # step in build_recommender_evidence_role_drilldown uses them
+    # to reason about the user's full background.
+    facts = staged.resume_facts_json or {}
+
+    try:
+        evidence = build_recommender_evidence_role_drilldown(
+            noc_code=noc_code,
+            user_skill_ids=user_skill_ids,
+            user_skill_names=user_skill_names,
+            user_skill_canon=user_skill_canon,
+            user_skill_name_to_canon=name_to_canon,
+            registry=registry,
+            today=date.today(),
+            user_work_history=facts.get("work_history") or [],
+            user_education=facts.get("education") or [],
+            user_certifications=facts.get("certifications") or [],
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "role_drilldown_dispatch evidence_build_failed noc=%s",
+            noc_code,
+        )
+        return None
+
+    if evidence is None:
+        # Invalid NOC code (defensive).
+        return None
+
+    # Empty OaSIS rows -> honest fallback (no table). Pending +
+    # surface STAY so user can pick a different one.
+    if not evidence.rows:
+        # Compute the other surfaced NOCs (excluding the one just
+        # tried) so the fallback can offer them.
+        surface = staged.last_recommender_adjacent_surface or ()
+        other_titles = tuple(
+            e.get("title", "") for e in surface
+            if isinstance(e, dict)
+            and isinstance(e.get("title"), str)
+            and isinstance(e.get("noc_code"), str)
+            and e["noc_code"] != noc_code
+        )
+        # Use role_title from surface metadata since evidence.role_title
+        # is empty when OaSIS returned nothing.
+        evidence_with_title = type(evidence)(
+            noc_code=evidence.noc_code,
+            role_title=role_title,
+            rows=evidence.rows,
+        )
+        reply = render_role_drilldown_empty_fallback(
+            evidence_with_title, other_titles,
+        )
+        # Keep pending + surface (user can pick another).
+        staged.touch()
+        new_session_id = store.save(staged)
+        return {
+            "reply": reply,
+            "profile_id": None,
+            "session_id": new_session_id,
+            "intake_state": staged.intake_state,
+            "asked_slots": [],
+            "next_action": intake_state.ACTION_PRESENT_MATCHES,
+            "recommended_jobs": [],
+            "next_skill_suggestion": None,
+            "resume_info": resume_info,
+            "requires_consent": True,
+        }
+
+    # Happy path: render deterministic table.
+    # For now, render the table without the LLM close (the
+    # responder integration in Phase 5 will append the LLM close).
+    # First-cut: emit the table verbatim. The LLM-close turn can
+    # be wired separately once Phase 5 lands.
+    table_md = render_role_drilldown_table(evidence)
+
+    # Pending + surface STAY ALIVE after success.
+    staged.touch()
+    new_session_id = store.save(staged)
+
+    log.info(
+        "role_drilldown_dispatched session=%s noc=%s rows=%d "
+        "matched=%d gaps=%d",
+        staged.session_id[:8],
+        noc_code,
+        len(evidence.rows),
+        sum(1 for r in evidence.rows if r.matched),
+        sum(1 for r in evidence.rows if not r.matched),
+    )
+
+    return {
+        "reply": table_md,
         "profile_id": None,
         "session_id": new_session_id,
         "intake_state": staged.intake_state,
@@ -932,7 +1275,12 @@ def _dispatch_recommender_from_intent(
     Returns the response dict, or None if anything in the dispatch
     chain failed (caller falls through to normal flow).
     """
-    if mode not in _VALID_RECOMMENDER_MODES:
+    if mode not in _VALID_RECOMMENDER_RESPONSE_MODES:
+        # Slice 5 (2026-06-29): intent-driven dispatch only accepts
+        # response modes (Layer A/B/C). The pending-only state
+        # adjacent_role_drilldown_select cannot be entered via
+        # intent classification -- it's set only by Layer C's
+        # render path. Defensive: drop forged/stale + log.
         log.warning(
             "recommender_intent_dispatch invalid mode=%r; falling through",
             mode,
@@ -1160,13 +1508,25 @@ def _dispatch_recommender_from_intent(
     reply = compose_response_v2(inp)
 
     # Slice 2 chain (locked): B -> C (offer); C -> END; A -> END.
-    # The closing in the prompt/fallback matches whichever next_mode
-    # is set here -- so the user's "yes" on the next turn routes
-    # correctly via the consume helper.
-    next_mode = _RECOMMENDER_NEXT_MODE.get(mode)
-    staged.pending_recommender_offer = next_mode
-    if next_mode is None:
-        staged.last_adjacent_nocs = ()
+    # Slice 5 (2026-06-29): when Layer C renders with content, the
+    # close becomes an explicit drilldown OFFER (handled by the
+    # prompt section + fallback constant). Populate the surface
+    # snapshot + switch pending state so the next-turn selection
+    # routes via _consume_drilldown_selection.
+    if mode == "adjacent_noc_standard" and rec_evidence.evidence:
+        _populate_recommender_adjacent_surface(staged, rec_evidence)
+        staged.pending_recommender_offer = "adjacent_role_drilldown_select"
+        # Keep last_adjacent_nocs populated for any other consumer
+        # (matching-engine sideways tier flow uses it). Only the
+        # SURFACE snapshot is new state.
+    else:
+        # The closing in the prompt/fallback matches whichever
+        # next_mode is set here -- so the user's "yes" on the next
+        # turn routes correctly via the consume helper.
+        next_mode = _RECOMMENDER_NEXT_MODE.get(mode)
+        staged.pending_recommender_offer = next_mode
+        if next_mode is None:
+            staged.last_adjacent_nocs = ()
     staged.touch()
     new_session_id = store.save(staged)
     return {

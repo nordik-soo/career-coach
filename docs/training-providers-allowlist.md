@@ -52,6 +52,7 @@ bit longer."
 | **Algoma University** | The local university; degrees, certificates, and continuing ed (business/IT/data) | `local_training` |
 | **Sault Community Career Centre** | Local employment + training advisory (sometimes referred to as SCCC). THE referral target when no specific URL is appropriate | `referral_only` (no direct URLs) |
 | **Northland Adult Learning Centre** | Newcomer-focused ESL + essential skills (computer literacy, math, basic communication) | `local_training` |
+| **OntarioColleges.ca** | Official Ontario public-college program search; useful when a current local program URL is unavailable or changes by intake | `local_training` |
 
 ### Ontario credential authorities
 
@@ -62,6 +63,10 @@ bit longer."
 | **Ontario.ca** | Government of Ontario information portal (driver licensing, business licensing, regulated professions). Use `Ontario.ca` for information pages; transactional `ServiceOntario` URLs are a separate entry when needed | `credential_pathway` |
 | **ServiceOntario** | Transactional services (renewals, fee payments, document requests). Use only when the URL is a service-transaction page, not informational | `credential_pathway` |
 | **Ministry of Labour, Immigration, Training and Skills Development** | Apprenticeship registration and trade compliance | `credential_pathway` |
+| **Smart Serve Ontario** | Ontario's recognized responsible alcohol-service certification provider for hospitality and event roles | `credential_pathway` |
+| **Sault Ste. Marie Police Service** | Local police-service source for police record checks / vulnerable sector checks in the SSM catchment | `credential_pathway` |
+| **College of Early Childhood Educators** | Ontario regulator for Registered Early Childhood Educators (RECE) | `credential_pathway` |
+| **College of Nurses of Ontario** | Ontario regulator for RN/RPN/NP registration and nursing practice requirements | `credential_pathway` |
 
 ### National MOOCs / vendor certifications
 
@@ -74,6 +79,7 @@ bit longer."
 | **edX** | Same standard as Coursera | `online_course` |
 | **CompTIA** | Vendor-neutral IT certs (A+, Network+, Security+) | `credential_pathway`, `online_course` |
 | **Intuit (QuickBooks)** | Vendor-official accounting training | `online_course` |
+| **National Payroll Institute** | Canadian payroll education/certification body for payroll compliance and administration pathways | `credential_pathway` |
 
 ### Health/safety credential providers
 

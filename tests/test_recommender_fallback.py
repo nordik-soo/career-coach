@@ -301,8 +301,10 @@ def test_adjacent_noc_standard_single_noc():
     assert "Coordinating" in text
     assert "If you wanted to move toward" in text  # exploratory voice
     assert "emphasizes" in text.lower()  # development-area voice
-    # Chain ENDS here -- natural follow-up.
-    assert "dig into" in text.lower()
+    # Slice 5 (2026-06-29): Layer C close changed from natural
+    # follow-up to explicit drilldown offer.
+    assert "skill-by-skill comparison" in text.lower()
+    assert "say which one" in text.lower()
 
 
 def test_adjacent_noc_standard_multiple_nocs_grouped():
@@ -338,8 +340,8 @@ def test_adjacent_noc_standard_multiple_nocs_grouped():
     # NOC 13100's skill appears in its paragraph.
     biz_chunk = text[biz_idx:]
     assert "Coordinating" in biz_chunk
-    # Chain ENDS here.
-    assert "dig into" in text.lower()
+    # Slice 5 (2026-06-29): close is the explicit drilldown offer.
+    assert "skill-by-skill comparison" in text.lower()
 
 
 def test_adjacent_noc_standard_no_forbidden_deficit_phrases():

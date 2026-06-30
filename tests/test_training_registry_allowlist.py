@@ -53,12 +53,17 @@ ALLOWED_PROVIDERS: frozenset[str] = frozenset({
     "Algoma University",
     "Sault Community Career Centre",
     "Northland Adult Learning Centre",
+    "OntarioColleges.ca",
     # Ontario credential authorities
     "Skilled Trades Ontario",
     "DriveTest",
     "Ontario.ca",
     "ServiceOntario",
     "Ministry of Labour, Immigration, Training and Skills Development",
+    "Smart Serve Ontario",
+    "Sault Ste. Marie Police Service",
+    "College of Early Childhood Educators",
+    "College of Nurses of Ontario",
     # National MOOCs / vendor certifications
     "Microsoft Learn",
     "AWS Skill Builder",
@@ -67,6 +72,7 @@ ALLOWED_PROVIDERS: frozenset[str] = frozenset({
     "edX",
     "CompTIA",
     "Intuit (QuickBooks)",
+    "National Payroll Institute",
     # Health / safety credential providers
     "Canadian Red Cross",
     "St. John Ambulance",

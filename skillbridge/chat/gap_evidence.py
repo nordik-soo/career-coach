@@ -188,6 +188,7 @@ class LayerAResult:
 _LAYER_A_SQL: str = """
     SELECT ns.skill_id      AS skill_id,
            s.skill_name     AS skill_name,
+           s.description    AS description,
            ns.importance    AS importance,
            o.title          AS noc_title
       FROM reference.noc_skill ns
@@ -196,6 +197,10 @@ _LAYER_A_SQL: str = """
      WHERE ns.noc_code = %s
      ORDER BY ns.importance DESC NULLS LAST, s.skill_name
 """
+# Slice 7a (2026-06-30): description added for the drilldown's
+# semantic cascade rung (OaSIS side embeds 'name: description' when
+# present). Layer A and Layer C consumers ignore the new column;
+# they extract specific fields by key. Safe additive change.
 
 
 def _fetch_noc_skill_rows(noc_code: str) -> list[dict[str, Any]]:
@@ -663,3 +668,87 @@ class RecommenderEvidence:
     mode: RecommenderMode
     evidence: tuple[GapEvidence, ...]
     training: tuple[TrainingResource, ...]
+
+
+# ---------------------------------------------------------------------------
+# Slice 5 (2026-06-29): role drilldown evidence -- adjacent-role
+# skill comparison table.
+#
+# When the user picks one NOC from Layer C's adjacent surface (via the
+# pending offer `adjacent_role_drilldown_select` + ordinal/name resolver),
+# the recommender renders a side-by-side OaSIS-vs-resume comparison:
+# top-7 OaSIS skills for the chosen NOC, each marked matched / not
+# matched against the user's resume + chat skills, with training
+# direction for the gap rows.
+#
+# Kept as a SEPARATE payload from RecommenderEvidence -- the response
+# shape (deterministic markdown table) and dispatch path are distinct
+# from the Layer A/B/C prose surfaces. See slice 5 spec.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class RoleDrilldownSkillRow:
+    """One row of the drilldown skill comparison table.
+
+    Slice 8 (2026-06-30) added LLM-judgment fields:
+      user_evidence: short coach-prose string written by the LLM
+        judgment pass. Used as the "Your Evidence" table cell when
+        matched=True. None when matched=False OR when the LLM was
+        unavailable and the pipeline fell back to cosine-only.
+      reason: 1-sentence explanation of WHY the evidence demonstrates
+        the OaSIS skill. Logged + stored for audit; NOT rendered in
+        the table (slice 8 lock §3 keeps the table at 4 columns).
+
+    Slice 8 also DEPRECATED `your_skill_names` -- kept for backwards
+    compatibility with cosine-only fallback paths, but the renderer
+    prefers `user_evidence` when present.
+
+    Fields:
+      oasis_skill_name: OaSIS canonical skill name from
+        reference.noc_skill JOIN reference.skill (e.g. "Coordinating").
+      oasis_skill_id: stable canonical id for traceability; NOT
+        user-facing.
+      importance: 0.0-5.0 from reference.noc_skill.importance; used
+        for row ordering. None when the OaSIS row had no importance.
+      matched: cascade-match outcome (skill_id -> canonical/name ->
+        cosine candidate -> LLM judgment). Binary by lock; coach-
+        quality nuance lives in user_evidence.
+      your_skill_names: DEPRECATED post-slice-8. 0-2 user-side skill
+        names from the legacy cosine path. Renderer falls back to
+        this when user_evidence is None (LLM unavailable).
+      user_evidence: NEW slice 8. LLM-written coach-prose string
+        (~150 chars) for the "Your Evidence" cell. None when
+        matched=False or LLM unavailable.
+      reason: NEW slice 8. LLM-written ~120-char explanation of why
+        user_evidence demonstrates the OaSIS skill. Logged, not
+        rendered.
+      training_provider: verified TrainingRegistry provider name when
+        matched is False AND registry has an entry. None otherwise.
+      training_url: matching https URL when training_provider is set.
+        None when matched is True (no training needed) OR registry
+        miss (renderer emits "ask SCCC").
+    """
+    oasis_skill_name: str
+    oasis_skill_id: str
+    importance: float | None
+    matched: bool
+    your_skill_names: tuple[str, ...]
+    training_provider: str | None
+    training_url: str | None
+    user_evidence: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoleDrilldownEvidence:
+    """Slice 5 payload for adjacent_role_drilldown render mode.
+
+    Contains the heading metadata (target NOC + title) and the
+    top-7 OaSIS skill rows for the comparison table.
+
+    Empty `rows` means the OaSIS profile for this NOC isn't loaded
+    -- the renderer emits an honest fallback canned text instead of
+    a table.
+    """
+    noc_code: str
+    role_title: str
+    rows: tuple[RoleDrilldownSkillRow, ...]

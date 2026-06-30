@@ -128,6 +128,41 @@ if CHAT_ORCHESTRATOR not in {"v1", "v2"}:
 TRAINING_REGISTRY_ENABLED = _bool("TRAINING_REGISTRY_ENABLED", False)
 
 
+# ------------------------------------------------- Drilldown semantic mode
+# Slice 7a (2026-06-30): tri-state rollout switch for the role
+# drilldown's 4th match cascade rung (semantic embedding +
+# cosine similarity). Bridges the OaSIS abstract-competency vs
+# resume concrete-task vocabulary mismatch surfaced in slice 5
+# live verify.
+#
+# Values:
+#   off  (default) -- exact-only cascade (id -> canonical -> name).
+#                     No semantic computation. No log. Production-safe.
+#   log            -- compute semantic scores + emit Cartesian
+#                     calibration log per drilldown. Does NOT affect
+#                     the visible ✓/✗ status. Use for calibration.
+#   on             -- semantic affects ✓/✗ at the hardcoded threshold
+#                     in recommender_assembly._DRILLDOWN_SEMANTIC_THRESHOLD.
+#                     Use only after calibration locks the threshold.
+#
+# Bad value (e.g. "banana", "1", "", whitespace) -> off (defensive).
+# Case-insensitive; whitespace-tolerant.
+#
+# Rollout sequence: deploy with off -> flip to log locally + inspect
+# calibration log -> pick threshold from observed distribution +
+# hardcode in recommender_assembly -> flip to on locally to verify
+# table behavior -> deploy with on (or stay off until ready).
+_DRILLDOWN_SEMANTIC_RAW = os.environ.get(
+    "DRILLDOWN_SEMANTIC", "off",
+).strip().lower()
+_DRILLDOWN_SEMANTIC_VALID: set[str] = {"off", "log", "on"}
+DRILLDOWN_SEMANTIC_MODE: str = (
+    _DRILLDOWN_SEMANTIC_RAW
+    if _DRILLDOWN_SEMANTIC_RAW in _DRILLDOWN_SEMANTIC_VALID
+    else "off"
+)
+
+
 # ------------------------------------------------- Deterministic message routing
 # Gates whether the handler runs the deterministic `route_from_understanding`
 # layer (chat orchestration v2.1) before the planner LLM call. When OFF

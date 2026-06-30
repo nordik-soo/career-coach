@@ -42,6 +42,8 @@ if TYPE_CHECKING:
     from skillbridge.chat.gap_evidence import (
         GapEvidence,
         RecommenderEvidence,
+        RoleDrilldownEvidence,
+        RoleDrilldownSkillRow,
         TrainingResource,
     )
 
@@ -58,6 +60,14 @@ _CLOSE_LOCAL_GAP_COACH: str = (
 )
 _CLOSE_ADJACENT_NOC_STANDARD_NATURAL: str = (
     "Want to dig into one of these in particular?"
+)
+# Slice 5 (2026-06-29): Layer C close becomes an EXPLICIT offer
+# that maps to the new pending state adjacent_role_drilldown_select.
+# Replaces _CLOSE_ADJACENT_NOC_STANDARD_NATURAL at all call sites
+# that intend to enable the drilldown handoff.
+_CLOSE_ADJACENT_NOC_STANDARD_OFFER_DRILLDOWN: str = (
+    "Want a skill-by-skill comparison and training options for one "
+    "of these? Say which one."
 )
 _CLOSE_TARGET_NOC_STANDARD_NATURAL: str = (
     "Anything in there you want to dig into?"
@@ -236,8 +246,13 @@ def _render_adjacent_noc_standard(rec: "RecommenderEvidence") -> str:
         )
 
     body = " ".join(paragraphs)
-    # Chain ENDS here -- natural follow-up only.
-    return body + " Want to dig into one of these in particular?"
+    # Slice 5 (2026-06-29): chain close changed from natural follow-up
+    # to explicit drilldown offer. Pairs with the handler setting
+    # pending_recommender_offer = "adjacent_role_drilldown_select" +
+    # populating staged.last_recommender_adjacent_surface, so the user's
+    # next-turn selection routes via the consume hook to the drilldown
+    # dispatcher.
+    return body + " " + _CLOSE_ADJACENT_NOC_STANDARD_OFFER_DRILLDOWN
 
 
 def _training_matches_gap(
@@ -251,3 +266,206 @@ def _training_matches_gap(
         return training.skill_id == gap.skill_id
     # Fall back to case-insensitive name match.
     return training.skill_name.strip().lower() == gap.skill_name.strip().lower()
+
+
+# ===========================================================================
+# Slice 5 (2026-06-29) -- role drilldown markdown table renderer
+# ===========================================================================
+#
+# Per the locked design: the table is rendered DETERMINISTICALLY by
+# Python, NOT by the LLM. The LLM only writes an optional short close
+# AFTER the table. This eliminates hallucination risk in the "Your
+# Skill" cell because that cell is a concrete data field, not LLM
+# prose.
+#
+# Honest fallback: when RoleDrilldownEvidence has empty rows (OaSIS
+# profile not loaded for the chosen NOC), render no table -- emit a
+# short canned text inviting the user to pick a different surfaced
+# NOC.
+# ===========================================================================
+_DRILLDOWN_EMPTY_OASIS_FALLBACK: str = (
+    "I don't have a Canadian/NOC standard profile loaded for "
+    "{role_title} yet. {other_options_clause}"
+)
+
+
+def render_role_drilldown_table(
+    evidence: "RoleDrilldownEvidence",
+    target_role_text: str | None = None,
+) -> str:
+    """Slice 5 deterministic markdown table renderer.
+
+    Returns the heading + table markdown for the drilldown payload.
+    The caller (responder) appends the LLM-written close after this
+    block.
+
+    Empty rows -> caller emits honest fallback via
+    render_role_drilldown_empty_fallback (NOT this function).
+
+    Args:
+        evidence: RoleDrilldownEvidence with role_title + rows.
+        target_role_text: NOT used by the table itself, but kept in
+            the signature for parity with other renderers that need
+            user-facing role text.
+
+    Returns:
+        Markdown string: `**Target role:** ...` heading + table.
+    """
+    role_label = evidence.role_title or "this role"
+    noc_suffix = (
+        f" (NOC {evidence.noc_code})" if evidence.noc_code else ""
+    )
+    heading = f"**Target role:** {role_label}{noc_suffix}\n\n"
+
+    if not evidence.rows:
+        # Empty rows shouldn't reach this renderer (caller should
+        # have routed to fallback). Defensive: return just the
+        # heading.
+        return heading.rstrip()
+
+    # Slice 8 (2026-06-30): column header renamed from "Your Skill"
+    # (mechanical comma-list) to "Your Evidence" (LLM-written coach
+    # prose when available). The cell content function below prefers
+    # row.user_evidence over row.your_skill_names.
+    table_lines: list[str] = [
+        "| OaSIS Skill | Your Evidence | Status | Training Direction |",
+        "|---|---|---|---|",
+    ]
+    for row in evidence.rows:
+        table_lines.append(_render_drilldown_row(row))
+
+    return heading + "\n".join(table_lines)
+
+
+def _render_drilldown_row(row: "RoleDrilldownSkillRow") -> str:
+    """Render a single row of the drilldown table.
+
+    Cell formats per locked design:
+      OaSIS Skill: row.oasis_skill_name verbatim
+      Your Evidence (slice 8):
+        matched=True with row.user_evidence (LLM-written): the LLM
+          string verbatim (coach prose, ~150 chars max)
+        matched=True without user_evidence (cosine-only fallback):
+          up to 2 names from row.your_skill_names, comma-separated
+        matched=False: "—" (em-dash)
+      Status: "✓" if matched else "✗"
+      Training Direction (matched=True): "already have"
+      Training Direction (matched=False) + registry hit:
+        markdown link "[provider](url)"
+      Training Direction (matched=False) + registry miss:
+        "ask SCCC"
+    """
+    # Slice 8: prefer LLM-written user_evidence when present; fall
+    # back to your_skill_names list (slice 7a behavior, used when
+    # LLM is unavailable or the fallback path fired).
+    if not row.matched:
+        your_skill = "—"
+    elif row.user_evidence:
+        your_skill = row.user_evidence
+    elif row.your_skill_names:
+        your_skill = ", ".join(row.your_skill_names)
+    else:
+        # Matched but no evidence content -- defensive fallback so
+        # the cell isn't empty.
+        your_skill = "—"
+
+    status = "✓" if row.matched else "✗"
+
+    if row.matched:
+        training = "already have"
+    elif row.training_provider and row.training_url:
+        # Markdown link rendering; clickable in markdown surfaces,
+        # readable as plain text in non-markdown chat surfaces.
+        training = f"[{row.training_provider}]({row.training_url})"
+    else:
+        training = "ask SCCC"
+
+    # Defensive escaping: a pipe character in a cell would break the
+    # markdown table. Replace with the HTML-style escape that
+    # renderers commonly accept; if the cell content can never
+    # legitimately have a pipe (provider names from registry should
+    # not), this is a no-op for valid data and a safety net for
+    # malformed data.
+    cells = [
+        row.oasis_skill_name.replace("|", "\\|"),
+        your_skill.replace("|", "\\|"),
+        status,
+        training.replace("|", "\\|"),
+    ]
+    return "| " + " | ".join(cells) + " |"
+
+
+def render_role_drilldown_empty_fallback(
+    evidence: "RoleDrilldownEvidence",
+    other_surface_titles: tuple[str, ...] = (),
+) -> str:
+    """Slice 5 honest fallback when the OaSIS profile isn't loaded
+    for the chosen NOC. Mirrors slice 2's _LAYER_A_EMPTY_HONEST
+    shape -- never invents skills, never renders an empty table.
+
+    Args:
+        evidence: RoleDrilldownEvidence with role_title (possibly
+            empty) and rows=().
+        other_surface_titles: titles of the OTHER NOCs still in
+            the user's adjacent surface (so they can pick one).
+            Empty -> no alternative options offered.
+    """
+    role_label = evidence.role_title or "that role"
+    if other_surface_titles:
+        joined = (
+            other_surface_titles[0] if len(other_surface_titles) == 1
+            else (
+                ", ".join(other_surface_titles[:-1])
+                + " or "
+                + other_surface_titles[-1]
+            )
+        )
+        clause = f"Want to dig into {joined} instead?"
+    else:
+        clause = (
+            "Want to look at a different target, or check what jobs "
+            "are open in this field?"
+        )
+    return _DRILLDOWN_EMPTY_OASIS_FALLBACK.format(
+        role_title=role_label,
+        other_options_clause=clause,
+    )
+
+
+def render_role_drilldown_reprompt(
+    surface: tuple[dict, ...],
+) -> str:
+    """Slice 5 re-prompt when the user's selection didn't resolve
+    (consent='yes' without specifying a role, or multiple title
+    matches). Asks the user to clarify with explicit options.
+
+    Args:
+        surface: the active last_recommender_adjacent_surface; each
+            entry has noc_code + title.
+    """
+    if not surface:
+        return (
+            "I don't have any adjacent roles saved from this "
+            "conversation. Want me to look at related career paths "
+            "for your target?"
+        )
+    titles = [
+        e.get("title", "")
+        for e in surface
+        if isinstance(e, dict) and e.get("title")
+    ]
+    if not titles:
+        return (
+            "I don't have any adjacent roles saved from this "
+            "conversation. Want me to look at related career paths "
+            "for your target?"
+        )
+    if len(titles) == 1:
+        joined = titles[0]
+    else:
+        joined = (
+            ", ".join(titles[:-1]) + ", or " + titles[-1]
+        )
+    return (
+        f"Which one would you like to compare against -- {joined}?"
+    )

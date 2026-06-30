@@ -228,6 +228,9 @@ def test_noc_standard_dispatches_layer_a(monkeypatch):
 
 
 def test_career_exploration_dispatches_layer_c(monkeypatch):
+    """Slice 5 UPDATE (2026-06-29): Layer C with content no longer
+    ends the chain. It transitions to drilldown_select pending state
+    + populates the surface snapshot for the next-turn selection."""
     monkeypatch.setattr(
         "skillbridge.chat.recommender_intent.classify_career_intent",
         lambda **kwargs: "career_exploration",
@@ -240,10 +243,11 @@ def test_career_exploration_dispatches_layer_c(monkeypatch):
     )
     assert out is not None
     assert out["reply"]
-    # Layer C is the chain terminal -> next mode is None.
-    assert sp.pending_recommender_offer is None
-    # last_adjacent_nocs cleared on chain end.
-    assert sp.last_adjacent_nocs == ()
+    # Slice 5: Layer C with content -> drilldown_select pending +
+    # surface populated. last_adjacent_nocs preserved (slice 5 only
+    # touches the NEW surface field, not the old matching-engine one).
+    assert sp.pending_recommender_offer == "adjacent_role_drilldown_select"
+    assert len(sp.last_recommender_adjacent_surface) > 0
 
 
 def test_training_recommendation_routes_to_layer_b(monkeypatch):

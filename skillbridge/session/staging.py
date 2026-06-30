@@ -134,6 +134,11 @@ _VALID_RECOMMENDER_MODES: frozenset[str] = frozenset({
     "local_gap_coach",
     "target_noc_standard",
     "adjacent_noc_standard",
+    # Slice 5 (2026-06-29): pending-select state used while the user
+    # is choosing which adjacent NOC to drill into. NOT a response
+    # mode -- it's a routing signal for the consume hook. The actual
+    # render payload is RoleDrilldownEvidence, dispatched separately.
+    "adjacent_role_drilldown_select",
 })
 
 _VALID_WHY_ADJACENT: frozenset[str] = frozenset({
@@ -458,6 +463,40 @@ class StagedProfile:
     #     deferred one).
     deferred_career_intent: str | None = None
 
+    # Slice 5 (2026-06-29): capture which adjacent NOCs were shown
+    # in the most recent Layer C render. Lets the next-turn ordinal/
+    # name resolver in _dispatch_recommender_consume map "the first
+    # one" / "administrative secretary" / "13110" back to a concrete
+    # NOC code for drilldown dispatch.
+    #
+    # SHAPE: tuple of dicts; each dict has exactly:
+    #   {"noc_code": "13110", "title": "Administrative assistant"}
+    # Capped at 3 entries (matches _MAX_RECOMMENDER_ADJACENT_NOCS in
+    # the recommender_assembly slice 4 helper). Title is the OaSIS
+    # noc_title from reference.noc_skill.
+    #
+    # LIFECYCLE (paired with pending_recommender_offer per slice 5
+    # lock; both stay alive while user is in selection context, both
+    # clear together):
+    #   - Set: when Layer C renders adjacent NOCs in the recommender
+    #     dispatcher (intent or consume path).
+    #   - Kept after drilldown render: user can pick another from the
+    #     same surface ("now the second one"). Pending also kept as
+    #     "adjacent_role_drilldown_select".
+    #   - Cleared:
+    #       * target_role_text change (__setattr__ override below)
+    #       * target_noc change (__setattr__ override below)
+    #       * user declines (consume hook consent=="no")
+    #       * user pivots to unrelated intent (consume hook consent
+    #         =="other" with no surface match)
+    #
+    # COOKIE COST: capped at 3 entries; each ~60-80 bytes JSON
+    # (noc_code 5 chars + title up to ~50 chars + framing). Worst-
+    # case ~250 bytes. Same lossless-empty rule as last_adjacent_nocs.
+    last_recommender_adjacent_surface: tuple[dict, ...] = field(
+        default_factory=tuple,
+    )
+
     # ----------------------------------------------- attribute interception
     def __setattr__(self, name: str, value: Any) -> None:
         """Invalidate cached target_noc when target_role_text changes.
@@ -516,6 +555,13 @@ class StagedProfile:
                 # surface a new sideways_move with potentially
                 # different adjacent NOCs.
                 self.__dict__["last_adjacent_nocs"] = ()
+                # Slice 5 (2026-06-29): target switch invalidates
+                # the recommender's adjacent-NOC surface snapshot --
+                # the prior surface was computed against the prior
+                # target's skill profile + adjacency pipeline. Drop
+                # it so post-target-change selection can't pick from
+                # the stale list.
+                self.__dict__["last_recommender_adjacent_surface"] = ()
                 # Slice 1 follow-up (2026-06-23): clear deferred
                 # career intent ONLY on a true target switch (prior
                 # value existed and new differs). On a FIRST target
@@ -732,6 +778,12 @@ class StagedProfile:
             # so empty state pays zero bytes.
             if data.get("deferred_career_intent") is None:
                 data.pop("deferred_career_intent", None)
+            # Slice 5 (2026-06-29): lossless minification for
+            # last_recommender_adjacent_surface. Empty tuple/list is
+            # the default; drop the key.
+            surface = data.get("last_recommender_adjacent_surface")
+            if not surface:  # () or [] or None
+                data.pop("last_recommender_adjacent_surface", None)
         return json.dumps(data, separators=(",", ":"))
 
     @classmethod
@@ -814,6 +866,15 @@ class StagedProfile:
         if "deferred_career_intent" in data:
             data["deferred_career_intent"] = _sanitize_deferred_career_intent(
                 data["deferred_career_intent"]
+            )
+        # Slice 5 (2026-06-29): last_recommender_adjacent_surface is a
+        # tuple of dicts {noc_code, title}. Sanitizer drops malformed
+        # entries and caps at 3.
+        if "last_recommender_adjacent_surface" in data:
+            data["last_recommender_adjacent_surface"] = (
+                _sanitize_last_recommender_adjacent_surface(
+                    data["last_recommender_adjacent_surface"]
+                )
             )
         return cls(**data, skills=skills)
 
@@ -1009,15 +1070,20 @@ def _sanitize_pending_adjacent_offer(value: Any) -> bool:
 def _sanitize_pending_recommender_offer(value: Any) -> str | None:
     """Defensive-deserialize the conversational recommender pending
     offer mode. Returns the value verbatim only when it's one of the
-    canonical RecommenderMode strings (local_gap_coach /
-    target_noc_standard / adjacent_noc_standard); any other value
+    canonical strings in _VALID_RECOMMENDER_MODES; any other value
     -- including non-str, unknown strings, empty string -- collapses
     to None.
 
+    As of slice 5 (2026-06-29) the valid set is:
+      - local_gap_coach            -- Layer B response mode
+      - target_noc_standard        -- Layer A response mode
+      - adjacent_noc_standard      -- Layer C response mode
+      - adjacent_role_drilldown_select -- pending-select state used
+        while the user is choosing which adjacent NOC to drill into
+
     Slice 5 step 2 invariant: a forged cookie cannot inject an
     arbitrary string that would route to a nonexistent recommender
-    flow. The handler trusts that any non-None value here is one of
-    the three known modes."""
+    flow."""
     if isinstance(value, str) and value in _VALID_RECOMMENDER_MODES:
         return value
     return None
@@ -1054,6 +1120,56 @@ def _sanitize_last_adjacent_nocs(value: Any) -> tuple[str, ...]:
         seen.add(code)
         out.append(code)
         if len(out) >= _MAX_LAST_ADJACENT_NOCS:
+            break
+    return tuple(out)
+
+
+# Slice 5 (2026-06-29): cap + sanitizer for the recommender's
+# adjacent-surface snapshot. Mirrors _MAX_LAST_ADJACENT_NOCS.
+_MAX_RECOMMENDER_ADJACENT_SURFACE: int = 3
+_MAX_SURFACE_TITLE_CHARS: int = 80
+
+
+def _sanitize_last_recommender_adjacent_surface(value: Any) -> tuple[dict, ...]:
+    """Defensive-deserialize last_recommender_adjacent_surface.
+
+    Returns a tuple of dicts {"noc_code", "title"}, capped at
+    _MAX_RECOMMENDER_ADJACENT_SURFACE. Drops any entry that:
+      - is not a dict
+      - has no string noc_code OR a noc_code that fails the 5-digit
+        all-digit validation
+      - has no string title OR an empty title
+
+    Cookie protection: a forged cookie cannot inject malformed
+    entries that would route the next-turn drilldown resolver to a
+    nonexistent NOC. Same validation discipline as
+    _sanitize_last_adjacent_nocs.
+    """
+    if not isinstance(value, (list, tuple)):
+        return ()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        noc = entry.get("noc_code")
+        title = entry.get("title")
+        if not isinstance(noc, str) or not isinstance(title, str):
+            continue
+        code = noc.strip()
+        if len(code) != 5 or not code.isdigit():
+            continue
+        title_stripped = title.strip()
+        if not title_stripped:
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        out.append({
+            "noc_code": code,
+            "title": title_stripped[:_MAX_SURFACE_TITLE_CHARS],
+        })
+        if len(out) >= _MAX_RECOMMENDER_ADJACENT_SURFACE:
             break
     return tuple(out)
 

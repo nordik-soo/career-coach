@@ -33,7 +33,10 @@ from typing import Any, Iterable
 from skillbridge.chat.gap_evidence import (
     GapEvidence,
     RecommenderEvidence,
+    RoleDrilldownEvidence,
+    RoleDrilldownSkillRow,
     TrainingResource,
+    _fetch_noc_skill_rows,
     compute_adjacent_noc_standard_gaps,
     compute_local_posting_gaps,
     compute_target_noc_standard_gaps,
@@ -581,3 +584,854 @@ def _compute_adjacent_nocs_for_recommender(staged: Any) -> tuple[str, ...]:
             "returning empty",
         )
         return ()
+
+
+# ---------------------------------------------------------------------------
+# Slice 5 (2026-06-29) -- role drilldown skill-comparison evidence
+# ---------------------------------------------------------------------------
+_MAX_DRILLDOWN_ROWS: int = 7  # top-7 OaSIS skills by importance (lock)
+_MAX_YOUR_SKILL_NAMES_PER_ROW: int = 2  # cap per locked design
+
+# Slice 8 (2026-06-30): cosine pre-pass threshold. Lowered from
+# slice 7a's 0.25 to 0.15 because cosine is NO LONGER the gate;
+# it's a SIGNAL the batched LLM judgment sees. The LLM rejects
+# weak cosine candidates that don't actually transfer. At 0.15,
+# more candidates surface for the LLM to consider, without
+# spamming the payload (cap _MAX_COSINE_CANDIDATES_PER_ROW=3).
+#
+# Calibration history (slice 7a): max cosine = 0.390 against
+# Jordan Miller resume vs NOC 13110. At 0.25, 3 rows match
+# (mostly weak bridges like 'account reconciliation' -> 'Coordinating').
+# At 0.15, more rows surface candidates but quality is the LLM's
+# job to decide.
+#
+# When LLM is unavailable (LLM_ENABLED=False / call failure), this
+# threshold RESUMES the slice-7a gate role: cosine-as-gate fallback.
+_DRILLDOWN_SEMANTIC_THRESHOLD: float = 0.15
+
+# Module-load startup log so operators can see active mode without
+# reading code. Fires once per process at import time.
+_STARTUP_LOG_EMITTED: bool = False
+
+
+def _emit_drilldown_startup_log() -> None:
+    """Emit one INFO line per process recording the active
+    DRILLDOWN_SEMANTIC mode + threshold. Idempotent."""
+    global _STARTUP_LOG_EMITTED
+    if _STARTUP_LOG_EMITTED:
+        return
+    _STARTUP_LOG_EMITTED = True
+    try:
+        from config import DRILLDOWN_SEMANTIC_MODE
+        mode = DRILLDOWN_SEMANTIC_MODE
+    except Exception:  # noqa: BLE001
+        mode = "off"
+    threshold_str = (
+        f"{_DRILLDOWN_SEMANTIC_THRESHOLD:.2f}" if mode != "off" else "N/A"
+    )
+    log.info(
+        "drilldown_semantic_mode=%s threshold=%s",
+        mode, threshold_str,
+    )
+
+
+_emit_drilldown_startup_log()
+
+
+def _semantic_score_user_vs_oasis(
+    *,
+    user_skill_names: list[str],
+    oasis_skill_name: str,
+) -> list[tuple[str, float]] | None:
+    """Slice 7a + Slice 8 hardening (2026-06-30): compute cosine
+    similarity between every user skill and the OaSIS skill.
+
+    Slice 8 lock: OaSIS side embeds skill_name ONLY (no description).
+    The earlier slice-7a version embedded "name: description" but
+    that was rejected at the slice 8 sign-off: descriptions inflate
+    cosine scores via generic boilerplate and conflict with the
+    "NOC skillset + user profile, not OaSIS description text" rule.
+    Bare names produce honest concrete<->concrete or concrete<->
+    abstract cosines, and the LLM judgment step (when mode=on) does
+    the real reasoning over user profile.
+
+    Returns [(user_name, score), ...] sorted by score DESC, or None
+    on embedding service failure.
+
+    Caller decides what to do with the scores based on mode:
+      - mode=log: log them; ✓/✗ unchanged (debug aid only)
+      - mode=on:  use as candidates for the batched LLM judgment
+    """
+    if not user_skill_names:
+        return []
+    try:
+        from skillbridge.embed.service import get_embedder
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "drilldown_semantic_failed reason=embed_service_import_failed "
+            "degrading=exact_only",
+        )
+        return None
+
+    embedder = get_embedder()
+    if embedder is None:
+        log.warning(
+            "drilldown_semantic_failed reason=embedder_unavailable "
+            "degrading=exact_only",
+        )
+        return None
+
+    try:
+        user_vecs = embedder.encode_many(list(user_skill_names))
+        oasis_vec = embedder.encode_one(oasis_skill_name)
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "drilldown_semantic_failed reason=encode_failed "
+            "degrading=exact_only",
+            exc_info=True,
+        )
+        return None
+
+    # Vectors are L2-normalized -> cosine = dot product.
+    import numpy as np
+    scores = (user_vecs @ oasis_vec).tolist()
+
+    pairs = list(zip(user_skill_names, scores))
+    pairs.sort(key=lambda p: p[1], reverse=True)
+    return pairs
+
+
+# ---------------------------------------------------------------------------
+# Slice 8 (2026-06-30) -- batched LLM judgment for drilldown
+# ---------------------------------------------------------------------------
+_MAX_COSINE_CANDIDATES_PER_ROW: int = 3
+_MAX_USER_EVIDENCE_CHARS: int = 200  # ~150 plus buffer
+_MAX_REASON_CHARS: int = 180  # ~120 plus buffer
+
+# Tool schema for Anthropic tool_use forced output. Mirrors the
+# pattern in recommender_intent.py.
+_DRILLDOWN_TOOL_NAME: str = "submit_drilldown_judgment"
+_DRILLDOWN_TOOL_SCHEMA: dict = {
+    "name": _DRILLDOWN_TOOL_NAME,
+    "description": (
+        "Submit per-skill judgment of whether the user's profile "
+        "demonstrates each OaSIS skill required for the adjacent "
+        "NOC. Return one judgment per skill in the order received."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "judgments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "oasis_skill": {"type": "string"},
+                        "matched": {"type": "boolean"},
+                        "user_evidence": {"type": ["string", "null"]},
+                        "reason": {"type": ["string", "null"]},
+                    },
+                    "required": [
+                        "oasis_skill", "matched",
+                        "user_evidence", "reason",
+                    ],
+                },
+            },
+        },
+        "required": ["judgments"],
+    },
+}
+
+
+def _judge_drilldown_with_llm(
+    *,
+    noc_code: str,
+    role_title: str,
+    noc_skillset: list[dict],
+    user_profile: dict,
+) -> dict[str, dict] | None:
+    """Slice 8: batched LLM judgment for drilldown table.
+
+    One Anthropic tool_use call with structured output. The LLM
+    receives all OaSIS skills (with their match_signal + cosine
+    candidates) plus the user's full profile, and returns one
+    judgment per skill.
+
+    Args:
+        noc_code: 5-digit adjacent NOC code.
+        role_title: OaSIS noc_title for the chosen adjacent role.
+        noc_skillset: list of dicts, one per OaSIS skill:
+            {
+              "skill": "Writing",
+              "match_signal": "exact" | "cosine" | "none",
+              "cosine_candidates": [
+                {"user_skill": "microsoft word", "score": 0.39},
+                ...
+              ]  (empty list when match_signal != "cosine")
+            }
+        user_profile: dict with keys skills / work_history /
+            education / certifications.
+
+    Returns:
+        Dict mapping oasis_skill name -> judgment dict, where each
+        judgment has keys (matched, user_evidence, reason). Indexed
+        by skill name so the caller can join into RoleDrilldownSkillRow
+        without ordering assumptions.
+
+        Returns None on any failure (LLM disabled / call errored /
+        invalid tool output / wrong structure). Caller falls back to
+        cosine-only result.
+    """
+    import json as _json
+    try:
+        from skillbridge.llm import LLM_ENABLED, LLM_MODEL, LLM_FALLBACK_MODEL
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "drilldown_llm_judgment_failed reason=llm_module_import_failed "
+            "degrading=cosine_only",
+        )
+        return None
+
+    if not LLM_ENABLED:
+        log.info(
+            "drilldown_llm_disabled noc=%s -- using cosine-only fallback",
+            noc_code,
+        )
+        return None
+
+    try:
+        import anthropic  # noqa: F401
+        from skillbridge.llm import _client_get
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "drilldown_llm_judgment_failed reason=anthropic_client_unavailable "
+            "degrading=cosine_only",
+        )
+        return None
+
+    from skillbridge.chat.prompts import DRILLDOWN_JUDGMENT_PROMPT
+
+    user_block = _json.dumps({
+        "noc_code": noc_code,
+        "role_title": role_title,
+        "noc_skillset": noc_skillset,
+        "user_profile": user_profile,
+    }, ensure_ascii=False, indent=2)
+
+    system_blocks = [{
+        "type": "text",
+        "text": DRILLDOWN_JUDGMENT_PROMPT,
+        "cache_control": {"type": "ephemeral"},
+    }]
+
+    def _do_call(model: str):
+        client = _client_get()
+        return client.messages.create(
+            model=model,
+            max_tokens=1200,  # ~7 judgments x ~120 chars + JSON shell
+            temperature=0,
+            system=system_blocks,
+            tools=[_DRILLDOWN_TOOL_SCHEMA],
+            tool_choice={"type": "tool", "name": _DRILLDOWN_TOOL_NAME},
+            messages=[{"role": "user", "content": user_block}],
+        )
+
+    try:
+        import anthropic
+        try:
+            resp = _do_call(LLM_MODEL)
+        except anthropic.APIStatusError as e:
+            if (e.status_code in (429, 529, 503)
+                    and LLM_MODEL != LLM_FALLBACK_MODEL):
+                log.warning(
+                    "drilldown llm overloaded on %s; falling back to %s",
+                    LLM_MODEL, LLM_FALLBACK_MODEL,
+                )
+                resp = _do_call(LLM_FALLBACK_MODEL)
+            else:
+                raise
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "drilldown_llm_judgment_failed reason=llm_call_failed "
+            "degrading=cosine_only", exc_info=True,
+        )
+        return None
+
+    # Extract tool_use block; mirror recommender_intent.py pattern.
+    tool_input = None
+    for block in resp.content:
+        block_type = getattr(block, "type", None)
+        if block_type == "tool_use":
+            tool_name = getattr(block, "name", None)
+            if tool_name != _DRILLDOWN_TOOL_NAME:
+                continue
+            tool_input = getattr(block, "input", None)
+            break
+
+    if not isinstance(tool_input, dict):
+        log.warning(
+            "drilldown_llm_judgment_invalid_output reason=no_tool_use_block "
+            "degrading=cosine_only",
+        )
+        return None
+
+    judgments_raw = tool_input.get("judgments")
+    if not isinstance(judgments_raw, list):
+        log.warning(
+            "drilldown_llm_judgment_invalid_output reason=judgments_not_list "
+            "degrading=cosine_only",
+        )
+        return None
+
+    # Map oasis_skill -> judgment, with defensive normalization.
+    out: dict[str, dict] = {}
+    for j in judgments_raw:
+        if not isinstance(j, dict):
+            continue
+        skill = j.get("oasis_skill")
+        if not isinstance(skill, str) or not skill.strip():
+            continue
+        matched_raw = j.get("matched")
+        if not isinstance(matched_raw, bool):
+            continue
+        ev = j.get("user_evidence")
+        rs = j.get("reason")
+        if matched_raw:
+            # Matched rows MUST have both evidence and reason.
+            if not isinstance(ev, str) or not ev.strip():
+                # Defensive: matched but no evidence -> drop to False.
+                matched_raw = False
+                ev, rs = None, None
+            else:
+                ev = ev.strip()[:_MAX_USER_EVIDENCE_CHARS]
+                rs = (
+                    rs.strip()[:_MAX_REASON_CHARS]
+                    if isinstance(rs, str) and rs.strip()
+                    else None
+                )
+        else:
+            # matched=False rows must NOT carry evidence/reason
+            ev, rs = None, None
+        out[skill.strip()] = {
+            "matched": matched_raw,
+            "user_evidence": ev,
+            "reason": rs,
+        }
+
+    if not out:
+        log.warning(
+            "drilldown_llm_judgment_invalid_output reason=empty_after_parse "
+            "degrading=cosine_only",
+        )
+        return None
+
+    log.info(
+        "drilldown_llm_judgment_ok noc=%s judgments=%d matched=%d",
+        noc_code, len(out),
+        sum(1 for j in out.values() if j["matched"]),
+    )
+    return out
+
+
+def build_recommender_evidence_role_drilldown(
+    *,
+    noc_code: str,
+    user_skill_ids: Iterable[str],
+    user_skill_names: Iterable[str],
+    user_skill_canon: Iterable[str],
+    user_skill_name_to_canon: dict[str, str] | None,
+    registry: TrainingRegistry | None,
+    today: date,
+    # Slice 8 hardening (2026-06-30): explicit kwargs replace the
+    # module-level _DRILLDOWN_USER_CONTEXT shim. The LLM judgment
+    # step uses these to reason about the user's full background
+    # (not just bare skill names). Defaults to None so slice 5/7a
+    # callers that don't pass them get empty lists in the LLM
+    # payload (LLM judges from skills only).
+    user_work_history: list | None = None,
+    user_education: list | None = None,
+    user_certifications: list | None = None,
+) -> RoleDrilldownEvidence | None:
+    """Slice 5: build the side-by-side OaSIS-vs-resume comparison
+    payload for an adjacent role the user picked from Layer C's
+    surface.
+
+    Pipeline:
+      1. Fetch OaSIS skills for `noc_code` via _fetch_noc_skill_rows
+         (sorted importance DESC by SQL).
+      2. Cap to top _MAX_DRILLDOWN_ROWS (=7).
+      3. Per row, run cascade match against the user's skill sets:
+         skill_id -> canonical -> name (binary outcome).
+      4. For matched rows: collect 0-2 user-side skill names
+         (alphabetical, capped at _MAX_YOUR_SKILL_NAMES_PER_ROW).
+      5. For unmatched rows: lookup TrainingRegistry by the OaSIS
+         skill name to attach a provider+URL (registry hit) or leave
+         None (renderer will emit "ask SCCC").
+
+    Args:
+        noc_code: 5-digit NOC code for the chosen adjacent role.
+        user_skill_ids: canonical skill IDs from the user's profile.
+        user_skill_names: lowercased raw skill names from the user.
+        user_skill_canon: canonical-form skill names from the user.
+        user_skill_name_to_canon: optional reverse map letting the
+            helper recover the user's raw skill name from a canonical
+            match, so the "Your Skill" cell shows the resume wording.
+            None -> match still works, but Your Skill cell uses the
+            canonical form.
+        registry: training registry instance; None -> all unmatched
+            rows have training=None (renderer falls back to SCCC).
+        today: date for Resource.surface_url freshness gate.
+
+    Returns:
+        RoleDrilldownEvidence with role_title (from OaSIS noc_title)
+        and rows tuple (up to 7).
+        None when noc_code is invalid (non-5-digit) -- caller emits
+        honest fallback.
+        RoleDrilldownEvidence with empty rows tuple when OaSIS has
+        no profile for this NOC -- caller emits honest fallback.
+    """
+    # Validate NOC code shape; mirrors _is_valid_noc_code discipline.
+    if not isinstance(noc_code, str):
+        return None
+    code = noc_code.strip()
+    if len(code) != 5 or not code.isdigit():
+        return None
+
+    try:
+        raw_rows = _fetch_noc_skill_rows(code)
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "recommender_drilldown_oasis_fetch_failed noc=%s", code,
+        )
+        return RoleDrilldownEvidence(
+            noc_code=code, role_title="", rows=(),
+        )
+
+    if not raw_rows:
+        # OaSIS profile not loaded for this NOC. Caller emits
+        # honest fallback (no table render).
+        return RoleDrilldownEvidence(
+            noc_code=code, role_title="", rows=(),
+        )
+
+    role_title = ""
+    if isinstance(raw_rows[0], dict):
+        first_title = raw_rows[0].get("noc_title")
+        if isinstance(first_title, str):
+            role_title = first_title.strip()
+
+    # Convert user inputs to sets for O(1) matching. Lowercase the
+    # name set (matching the canonicalize_skill convention).
+    id_set = {x for x in user_skill_ids if isinstance(x, str) and x}
+    name_set = {
+        x.lower() for x in user_skill_names
+        if isinstance(x, str) and x.strip()
+    }
+    canon_set = {
+        x for x in user_skill_canon if isinstance(x, str) and x.strip()
+    }
+    # Build canon -> raw name lookup so matched rows can show the
+    # user's resume wording in the "Your Skill" cell. When the
+    # caller didn't pass the reverse map, fall back to canonical
+    # form via canonicalize_skill round-trip.
+    name_to_canon = user_skill_name_to_canon or {}
+
+    # Slice 7a (2026-06-30) + Slice 8 (2026-06-30): read mode.
+    # off -> exact-only cascade, no cosine, no LLM (legacy behavior).
+    # log -> DEPRECATED post-slice-8, falls to off (no calibration
+    #        needed once LLM gates ✓/✗; threshold loses meaning).
+    # on  -> cosine pre-pass (signal) + batched LLM judgment (gate).
+    try:
+        from config import DRILLDOWN_SEMANTIC_MODE
+        semantic_mode = DRILLDOWN_SEMANTIC_MODE
+    except Exception:  # noqa: BLE001
+        semantic_mode = "off"
+
+    # Slice 8 hardening (2026-06-30): tri-state preserved.
+    #   off → no semantic, no LLM
+    #   log → cosine scored + Cartesian-logged, no LLM, no visible
+    #         effect (same ✓/✗ as off; useful for debugging score
+    #         distributions)
+    #   on  → cosine candidates + one batched LLM judgment (LLM is
+    #         the ✓/✗ gate)
+    # No silent collapse of log → off. The tri-state user contract
+    # holds.
+
+    # Materialize user_skill_names as a stable list (semantic helper
+    # consumes a list; existing exact-match cascade consumed sets).
+    user_names_list = [
+        x for x in user_skill_names if isinstance(x, str) and x.strip()
+    ]
+
+    # First pass: build prelim rows from exact cascade + (when mode=on)
+    # cosine candidates. This produces:
+    #   - row.matched from exact cascade (cosine still NOT a gate at
+    #     this point)
+    #   - row.your_skill_names from exact cascade only
+    #   - cosine_candidates_by_row: for LLM payload
+    #   - row_match_signal: 'exact' | 'cosine' | 'none' for LLM payload
+    rows: list[RoleDrilldownSkillRow] = []
+    row_match_signal: dict[str, str] = {}
+    cosine_candidates_by_row: dict[str, list[dict]] = {}
+
+    for raw in raw_rows[:_MAX_DRILLDOWN_ROWS]:
+        if not isinstance(raw, dict):
+            continue
+        skill_id = raw.get("skill_id")
+        skill_name = raw.get("skill_name")
+        importance = raw.get("importance")
+        # Slice 8 hardening (2026-06-30): description NO LONGER read
+        # for cosine. Per the lock, "do not use OaSIS descriptions
+        # as the matching anchor." The bare oasis_skill_name is
+        # what gets embedded. (Description still flows from SQL but
+        # is unused by this helper.)
+
+        if not isinstance(skill_id, str) or not isinstance(skill_name, str):
+            continue
+        oasis_name_stripped = skill_name.strip()
+        if not oasis_name_stripped:
+            continue
+        imp = float(importance) if isinstance(importance, (int, float)) else None
+
+        # ----- Exact cascade: id -> canonical -> name -------------
+        matched = False
+        matched_user_names: list[str] = []
+        if skill_id in id_set:
+            matched = True
+        oasis_canon = canonicalize_skill(oasis_name_stripped) or ""
+        if not matched and oasis_canon and oasis_canon in canon_set:
+            matched = True
+        if not matched and oasis_name_stripped.lower() in name_set:
+            matched = True
+
+        if matched:
+            row_match_signal[oasis_name_stripped] = "exact"
+            for user_raw, user_canon in name_to_canon.items():
+                if user_canon == oasis_canon:
+                    matched_user_names.append(user_raw)
+            if not matched_user_names:
+                target_lower = oasis_name_stripped.lower()
+                if target_lower in name_set:
+                    matched_user_names.append(oasis_name_stripped)
+            matched_user_names = sorted(set(matched_user_names))[
+                :_MAX_YOUR_SKILL_NAMES_PER_ROW
+            ]
+
+        # ----- Slice 8 hardening (2026-06-30): cosine pre-pass -----
+        # mode=on:  cosine produces candidates for the LLM payload.
+        #           Cosine does NOT gate ✓/✗; LLM does.
+        # mode=log: cosine computed + Cartesian-logged for debugging.
+        #           NO LLM call. NO ✓/✗ effect (same visible result
+        #           as off).
+        # mode=off: cosine NOT computed; sem_pairs stays None.
+        sem_pairs = None
+        if semantic_mode != "off" and not matched and user_names_list:
+            sem_pairs = _semantic_score_user_vs_oasis(
+                user_skill_names=user_names_list,
+                oasis_skill_name=oasis_name_stripped,
+            )
+
+        # Calibration log (slice 7a; preserved in slice 8 for log mode).
+        if semantic_mode == "log" and sem_pairs:
+            for u_name, score in sem_pairs:
+                u_token = (
+                    f"'{u_name}'"
+                    if (" " in u_name or "\t" in u_name)
+                    else u_name
+                )
+                log.info(
+                    "drilldown_calibration noc=%s oasis_id=%s "
+                    "oasis_name=%r user_name=%s score=%.3f",
+                    code, skill_id, oasis_name_stripped,
+                    u_token, score,
+                )
+
+        if not matched:
+            # Build cosine_candidates for LLM payload (top-K above
+            # threshold). Used by LLM as signal, not as the gate.
+            candidates: list[dict] = []
+            if sem_pairs:
+                for u_name, score in sem_pairs[
+                    :_MAX_COSINE_CANDIDATES_PER_ROW
+                ]:
+                    if score >= _DRILLDOWN_SEMANTIC_THRESHOLD:
+                        candidates.append({
+                            "user_skill": u_name,
+                            "score": round(float(score), 3),
+                        })
+            cosine_candidates_by_row[oasis_name_stripped] = candidates
+            row_match_signal[oasis_name_stripped] = (
+                "cosine" if candidates else "none"
+            )
+
+        # ----- Training direction lookup (unchanged) ---------------
+        training_provider: str | None = None
+        training_url: str | None = None
+        if not matched and registry is not None:
+            try:
+                resources = registry.surface_resources(
+                    oasis_name_stripped, today=today,
+                )
+                for res in resources:
+                    url = res.surface_url(today)
+                    if url:
+                        training_provider = res.provider
+                        training_url = url
+                        break
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "recommender_drilldown_training_lookup_failed "
+                    "skill=%r", oasis_name_stripped,
+                )
+
+        rows.append(RoleDrilldownSkillRow(
+            oasis_skill_name=oasis_name_stripped,
+            oasis_skill_id=skill_id,
+            importance=imp,
+            matched=matched,
+            your_skill_names=tuple(matched_user_names),
+            training_provider=training_provider,
+            training_url=training_url,
+            user_evidence=None,  # filled by LLM judgment below
+            reason=None,
+        ))
+
+    # ----- Slice 8: batched LLM judgment over ALL rows --------------
+    # Fires only in mode=on. Sees all 7 rows + their match_signal +
+    # cosine_candidates + the user's full profile. Returns one
+    # judgment per skill: matched (bool), user_evidence (string or
+    # null), reason (string or null).
+    #
+    # The judgment can CONFIRM or REJECT a cosine candidate. It
+    # cannot override an exact cascade match (those are locked at
+    # match_signal=exact; LLM sees them but is instructed to pass
+    # through).
+    if semantic_mode == "on" and rows:
+        # Build the noc_skillset payload (all rows, with match_signal
+        # + cosine_candidates).
+        noc_skillset = []
+        for r in rows:
+            signal = row_match_signal.get(r.oasis_skill_name, "none")
+            candidates = (
+                cosine_candidates_by_row.get(r.oasis_skill_name, [])
+                if signal == "cosine" else []
+            )
+            noc_skillset.append({
+                "skill": r.oasis_skill_name,
+                "match_signal": signal,
+                "cosine_candidates": candidates,
+            })
+
+        # Slice 8 hardening (2026-06-30): user_profile built from
+        # explicit kwargs (replaces the slice-8 first-cut module-
+        # level shim, which was unsafe under concurrent requests).
+        user_profile = {
+            "skills": list(user_names_list),
+            "work_history": user_work_history or [],
+            "education": user_education or [],
+            "certifications": user_certifications or [],
+        }
+
+        judgments = _judge_drilldown_with_llm(
+            noc_code=code,
+            role_title=role_title,
+            noc_skillset=noc_skillset,
+            user_profile=user_profile,
+        )
+
+        if judgments is not None:
+            # Merge LLM judgments into rows. Exact-cascade matches
+            # are preserved by trusting the LLM's matched=true echo
+            # (or, defensively, keeping matched=true even if LLM
+            # said False for an exact row -- exact is locked).
+            new_rows: list[RoleDrilldownSkillRow] = []
+            for r in rows:
+                j = judgments.get(r.oasis_skill_name)
+                if j is None:
+                    # LLM skipped this row -- keep cosine-only fallback.
+                    new_rows.append(r)
+                    continue
+                signal = row_match_signal.get(r.oasis_skill_name, "none")
+                # Exact cascade matches are locked (slice 8 spec §3
+                # second paragraph). LLM can ADD evidence/reason but
+                # cannot REJECT.
+                final_matched = r.matched or bool(j["matched"])
+                # If LLM returned evidence + reason, use them.
+                # Otherwise (LLM said matched=False for an exact-row),
+                # synthesize from the exact-cascade your_skill_names.
+                ev = j.get("user_evidence")
+                rs = j.get("reason")
+                if final_matched and not ev and r.your_skill_names:
+                    # Exact-cascade row with no LLM evidence: build
+                    # a minimal evidence string from the matched
+                    # user names so the cell isn't empty.
+                    ev = ", ".join(r.your_skill_names)
+                # If LLM said matched=False and we're NOT an exact row,
+                # also clear training (it should ✗ "ask SCCC").
+                training_provider = r.training_provider
+                training_url = r.training_url
+                if not final_matched and signal != "exact":
+                    # Already set if registry hit; otherwise None.
+                    pass
+
+                new_rows.append(RoleDrilldownSkillRow(
+                    oasis_skill_name=r.oasis_skill_name,
+                    oasis_skill_id=r.oasis_skill_id,
+                    importance=r.importance,
+                    matched=final_matched,
+                    your_skill_names=r.your_skill_names,
+                    training_provider=training_provider,
+                    training_url=training_url,
+                    user_evidence=ev,
+                    reason=rs,
+                ))
+            rows = new_rows
+        else:
+            # Slice 8 hardening (2026-06-30): LLM unavailable /
+            # failed. CONSERVATIVE fallback (locked option 'a' at
+            # sign-off): exact/canonical/name matches stay ✓; cosine-
+            # only rows stay ✗. We do NOT promote weak cosine
+            # candidates to ✓ without coach judgment -- 0.15 is too
+            # weak to become user-visible truth.
+            #
+            # Rows already passed through the exact cascade above,
+            # so r.matched=True iff exact/canonical/name hit. Cosine-
+            # signal rows (match_signal=cosine, candidates >= 0.15)
+            # stay at r.matched=False. Their training direction
+            # falls to the existing gap-row path (registry hit or
+            # "ask SCCC").
+            log.info(
+                "drilldown_llm_fallback noc=%s -- exact-only "
+                "(no cosine->matched promotion)",
+                code,
+            )
+            # rows stays as-is from the prelim pass. No change
+            # needed -- exact matches already have matched=True;
+            # cosine-only rows already have matched=False.
+
+    return RoleDrilldownEvidence(
+        noc_code=code,
+        role_title=role_title,
+        rows=tuple(rows),
+    )
+
+
+# Slice 8 hardening (2026-06-30): the transitional module-level
+# _DRILLDOWN_USER_CONTEXT shim (with set_/clear_ helpers) was
+# REMOVED. It was unsafe under concurrent requests -- one drilldown
+# request could read another's context. The helper signature now
+# accepts user_work_history / user_education / user_certifications
+# as explicit kwargs (see build_recommender_evidence_role_drilldown
+# signature above). Callers pass them per-request; no shared state.
+
+
+# ---------------------------------------------------------------------------
+# Slice 5: ordinal/name resolver for the adjacent_role_drilldown_select
+# pending state. Maps the user's selection message to one of the NOCs
+# in staged.last_recommender_adjacent_surface.
+# ---------------------------------------------------------------------------
+import re as _re
+
+# Ordinal word -> 0-based index mapping. Matches whole tokens only
+# (word-boundary) so "the third option" matches but "thirdsomething"
+# doesn't.
+#
+# Deliberately exclude "one" / "two" / "three" as standalone words:
+# they're filler in compound phrasings like "the second ONE", which
+# would otherwise match BOTH "second" (index 1) AND "one" (index 0)
+# -> ambiguous -> returns None instead of selecting index 1. Users
+# who really want index 0 will say "first" or "1st" or "1".
+_ORDINAL_PATTERNS: tuple[tuple[_re.Pattern[str], int], ...] = (
+    (_re.compile(r"\b(?:first|1st|1)\b", _re.IGNORECASE), 0),
+    (_re.compile(r"\b(?:second|2nd|2)\b", _re.IGNORECASE), 1),
+    (_re.compile(r"\b(?:third|3rd|3)\b", _re.IGNORECASE), 2),
+)
+
+
+def resolve_drilldown_selection(
+    user_message: str,
+    surface: Iterable[dict],
+) -> dict | None:
+    """Slice 5: map a user message to one of the surfaced adjacent
+    NOCs. Returns the matched surface entry dict, or None when the
+    message doesn't unambiguously resolve.
+
+    Match conditions (OR-ed):
+      1. NOC code exact: "13110" -> matches surface entry with that
+         noc_code
+      2. Ordinal: "first", "second", "third", "1", "2", "3", "1st",
+         "2nd", "3rd", "the first one", "option 2", etc. ->
+         index into surface
+      3. Title substring (case-insensitive): "sales manager" matches
+         "Area sales manager"; "secretary" matches "Administrative
+         secretary"
+
+    Returns None when:
+      - message is empty / non-str
+      - no condition matches
+      - multiple surface entries match ambiguously (e.g. "the
+        assistant" when surface has two assistant titles)
+
+    Caller (consume hook) treats None as ambiguous and re-prompts
+    OR clears state and hands off based on consent classifier.
+    """
+    if not isinstance(user_message, str) or not user_message.strip():
+        return None
+    surface_list = [
+        e for e in surface
+        if isinstance(e, dict)
+        and isinstance(e.get("noc_code"), str)
+        and isinstance(e.get("title"), str)
+    ]
+    if not surface_list:
+        return None
+    msg = user_message.strip()
+
+    # 1. NOC code exact match (highest priority).
+    for entry in surface_list:
+        if entry["noc_code"] in msg:
+            return entry
+
+    # 2. Ordinal match (single-position only; ambiguous if multiple
+    # ordinals appear).
+    ordinal_matches: list[int] = []
+    for pattern, idx in _ORDINAL_PATTERNS:
+        if pattern.search(msg):
+            ordinal_matches.append(idx)
+    if len(ordinal_matches) == 1:
+        idx = ordinal_matches[0]
+        if 0 <= idx < len(surface_list):
+            return surface_list[idx]
+    # If multiple ordinals match (e.g. "the first or second") OR an
+    # ordinal points past the surface length, fall through to title
+    # substring matching -- maybe the user disambiguated by name too.
+
+    # 3. Title substring match (case-insensitive). The entry title
+    # must appear as a substring of the user's message.
+    #
+    # Slice 5 hardening (2026-06-30): the OLD impl had a word-≥5-char
+    # fallback that matched any title word in the message. Live verify
+    # caught this firing too loosely: "construction site manager"
+    # matched BOTH "Construction managers" (via "construction") AND
+    # "Area sales manager" (via "manager") -> ambiguous -> None ->
+    # consume hook cleared state -> drilldown lost. The fallback was
+    # well-intentioned (paraphrase tolerance) but couldn't distinguish
+    # a strong topical hit ("construction") from a noisy filler hit
+    # ("manager"). The cleaner contract: require a real substring
+    # match of the FULL title. If the user paraphrases (typed
+    # "construction site manager" vs stored "Construction managers"),
+    # the resolver returns None and the consume hook re-prompts with
+    # explicit options.
+    msg_lower = msg.lower()
+    title_hits: list[dict] = []
+    for entry in surface_list:
+        title_lower = entry["title"].lower().strip()
+        if not title_lower:
+            continue
+        if title_lower in msg_lower:
+            title_hits.append(entry)
+
+    if len(title_hits) == 1:
+        return title_hits[0]
+    # Multiple title hits OR none -> ambiguous.
+    return None

@@ -132,9 +132,22 @@ def test_present_no_match_bypasses_llm_and_policy(monkeypatch) -> None:
 
 
 def test_present_no_match_reply_names_sccc_verbatim(monkeypatch) -> None:
-    """The deterministic fallback names Sault Community Career
-    Centre. This pins the wording so a future fallback rewrite
-    has to update the test rather than silently regress."""
+    """Slice 6 (2026-06-29) UPDATE: locked Option-1 text after live
+    verify caught the matching engine's no-match LLM repeatedly
+    making false claims ('I checked related roles' when recommender
+    never ran) and hollow offers ('want training directions?' with
+    no consume hook).
+
+    Locked text:
+      target set:    'I don't see any {target} postings in Sault
+                      Ste. Marie today.'
+      target unset:  'I don't see matching postings in Sault Ste.
+                      Marie today.'
+      + ' The Sault Community Career Centre has access to more
+         sources and can flag openings as they come up.'
+
+    No training offer. No related-role claim. No 'do you want?'
+    dead-end. No editorial market panorama."""
     from skillbridge.chat import responder
 
     monkeypatch.setattr(responder, "is_enabled", lambda: True)
@@ -145,14 +158,50 @@ def test_present_no_match_reply_names_sccc_verbatim(monkeypatch) -> None:
 
     inp = _input("present_no_match")
     reply = compose_response_v2(inp)
-    assert "I don't see one in today's Sault Ste. Marie postings" in reply
-    assert "Sault Community Career Centre" in reply
+    # Target-conditional absence statement.
+    assert "Sault Ste. Marie today" in reply
+    # SCCC referral.
+    assert (
+        "Sault Community Career Centre has access to more sources"
+        in reply
+    )
+    # Old offending claims absent.
+    assert "training direction" not in reply.lower()
+    assert "related roles" not in reply.lower()
+    assert "do you want" not in reply.lower()
+    # Old editorial padding absent.
+    assert "37 active" not in reply
+    assert "mostly in" not in reply.lower()
 
 
-def test_present_no_match_includes_next_skill_hint(monkeypatch) -> None:
-    """The fallback weaves in the `next_skill` "build X and Y more
-    jobs could open up" hint when present. AR-8e must preserve this
-    enrichment because it comes from the engine, not the LLM."""
+def test_present_no_match_uses_target_role_text_when_present(
+    monkeypatch,
+) -> None:
+    """Slice 6: when target_role_text is set, the absence sentence
+    uses it verbatim."""
+    from skillbridge.chat import responder
+
+    monkeypatch.setattr(responder, "is_enabled", lambda: True)
+    monkeypatch.setattr(responder, "call",
+                        _LLMSpy(must_not_run=True))
+    monkeypatch.setattr(responder, "_policy_ok_v2",
+                        _PolicySpy(must_not_run=True))
+
+    inp = _input("present_no_match")  # default helper sets a target
+    reply = compose_response_v2(inp)
+    # The reply should NAME the target role.
+    assert (
+        "I don't see any" in reply
+        and "postings in Sault Ste. Marie today" in reply
+    )
+
+
+def test_present_no_match_drops_next_skill_hint(monkeypatch) -> None:
+    """Slice 6 (2026-06-29) UPDATE: the locked Option-1 text is
+    MINIMAL -- just absence + SCCC referral. The next_skill engine
+    hint is no longer woven in (was part of the older editorial
+    padding that contributed nothing to the user's question and
+    added drift surface)."""
     from skillbridge.chat import responder
 
     monkeypatch.setattr(responder, "is_enabled", lambda: True)
@@ -163,8 +212,9 @@ def test_present_no_match_includes_next_skill_hint(monkeypatch) -> None:
 
     inp = _input("present_no_match", next_skill=("forklift operation", 4))
     reply = compose_response_v2(inp)
-    assert "forklift operation" in reply
-    assert "around 4 more current jobs" in reply
+    # next_skill no longer surfaced in the locked text.
+    assert "forklift operation" not in reply
+    assert "around 4 more" not in reply
     # SCCC referral still present.
     assert "Sault Community Career Centre" in reply
 
