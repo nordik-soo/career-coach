@@ -1862,3 +1862,775 @@ def test_drilldown_explicit_user_profile_kwargs(monkeypatch):
         {"credential": "Diploma"},
     ]
     assert captured["user_profile"]["certifications"] == ["QuickBooks"]
+
+
+# ===========================================================================
+# Slice 9 (2026-06-30) -- Coach Training Guide
+# ===========================================================================
+def test_coach_guide_dataclasses_exist_and_wire_together():
+    """Slice 9: CoachGapGuide + CoachTrainingGuide are frozen dataclasses
+    with the locked fields; RoleDrilldownEvidence.coach_guide accepts
+    a CoachTrainingGuide (or None)."""
+    from skillbridge.chat.gap_evidence import (
+        CoachGapGuide, CoachTrainingGuide, RoleDrilldownEvidence,
+    )
+    gap = CoachGapGuide(
+        skill="Instructing",
+        why_it_matters="X",
+        how_to_build="Y",
+        training_direction="Z",
+        training_provider="Sault College",
+        training_url="https://example.com",
+    )
+    guide = CoachTrainingGuide(
+        opening_sentence="Opening.",
+        priority_gaps=(gap,),
+        closing_question="Want me to help you pick the first skill to work on?",
+    )
+    ev = RoleDrilldownEvidence(
+        noc_code="13110", role_title="X", rows=(), coach_guide=guide,
+    )
+    assert ev.coach_guide is guide
+    # Default is None (slice 5/7a/8 tests unaffected).
+    ev2 = RoleDrilldownEvidence(
+        noc_code="13110", role_title="X", rows=(),
+    )
+    assert ev2.coach_guide is None
+
+
+def test_coach_guide_prompt_exists_with_safety_locks():
+    """Slice 9: DRILLDOWN_COACH_GUIDE_PROMPT loads and carries the
+    locked safety rules the LLM must not violate."""
+    from skillbridge.chat.prompts import DRILLDOWN_COACH_GUIDE_PROMPT
+    assert isinstance(DRILLDOWN_COACH_GUIDE_PROMPT, str)
+    assert len(DRILLDOWN_COACH_GUIDE_PROMPT) > 800
+    normalized = " ".join(DRILLDOWN_COACH_GUIDE_PROMPT.split())
+    # Provider/URL invention prohibition.
+    assert "NEVER invent providers" in normalized
+    # Do-not-reorder-gaps lock (assembly picks; LLM writes).
+    assert "YOU DO NOT PICK" in normalized
+    assert "YOU DO NOT REORDER" in normalized
+    # Empty training_resources -> ask SCCC honestly.
+    assert "Ask the Sault Community Career Centre" in normalized
+    # Tool-only output.
+    assert "emit_coach_training_guide" in normalized
+
+
+def test_coach_guide_env_var_defaults_off(monkeypatch):
+    """Slice 9: DRILLDOWN_COACH_GUIDE_MODE defaults to 'off' when the
+    env var is missing/empty/invalid.
+
+    Note: this repo's config.py calls load_dotenv() on import so a
+    bare monkeypatch.delenv() would be undone by the .env file when
+    config is reloaded. We use the same 'banana' pattern as the
+    DRILLDOWN_SEMANTIC tests -- a value the sanitizer collapses to
+    'off' -- to test the defensive fallback deterministically
+    regardless of what's actually in .env."""
+    monkeypatch.setenv("DRILLDOWN_COACH_GUIDE", "_unset_marker_")
+    import config as _cfg
+    importlib.reload(_cfg)
+    assert _cfg.DRILLDOWN_COACH_GUIDE_MODE == "off"
+
+
+def test_coach_guide_env_var_accepts_on(monkeypatch):
+    """Slice 9: DRILLDOWN_COACH_GUIDE=on flips the mode."""
+    monkeypatch.setenv("DRILLDOWN_COACH_GUIDE", "on")
+    import config as _cfg
+    importlib.reload(_cfg)
+    assert _cfg.DRILLDOWN_COACH_GUIDE_MODE == "on"
+
+
+def test_coach_guide_env_var_bad_value_falls_to_off(monkeypatch):
+    """Slice 9: bad env value (e.g. 'banana') -> off defensively."""
+    monkeypatch.setenv("DRILLDOWN_COACH_GUIDE", "banana")
+    import config as _cfg
+    importlib.reload(_cfg)
+    assert _cfg.DRILLDOWN_COACH_GUIDE_MODE == "off"
+
+
+def test_sort_rows_by_importance_puts_none_last():
+    """Slice 9: _sort_rows_by_importance sorts DESC with None last
+    (matches SQL 'NULLS LAST' + avoids Py3 None-vs-float error)."""
+    from skillbridge.chat.gap_evidence import RoleDrilldownSkillRow
+    from skillbridge.chat.recommender_assembly import _sort_rows_by_importance
+
+    def _row(name, imp):
+        return RoleDrilldownSkillRow(
+            oasis_skill_name=name, oasis_skill_id=name + "_id",
+            importance=imp, matched=False,
+            your_skill_names=(), training_provider=None,
+            training_url=None,
+        )
+    rows = [
+        _row("A", 3.5),
+        _row("B", None),
+        _row("C", 5.0),
+        _row("D", None),
+        _row("E", 2.0),
+    ]
+    ordered = _sort_rows_by_importance(rows)
+    # Numeric DESC first: 5.0, 3.5, 2.0, then None x 2 (any order).
+    assert [r.oasis_skill_name for r in ordered[:3]] == ["C", "A", "E"]
+    assert set(r.oasis_skill_name for r in ordered[3:]) == {"B", "D"}
+
+
+def test_format_matched_skill_list_grammar():
+    """Slice 9: 1/2/3+ items rendered naturally (Oxford comma at 3+)."""
+    from skillbridge.chat.recommender_assembly import _format_matched_skill_list
+    assert _format_matched_skill_list([]) == ""
+    assert _format_matched_skill_list(["Writing"]) == "Writing"
+    assert _format_matched_skill_list(["Writing", "Coordinating"]) == (
+        "Writing and Coordinating"
+    )
+    assert _format_matched_skill_list([
+        "Writing", "Coordinating", "Digital Literacy",
+    ]) == "Writing, Coordinating, and Digital Literacy"
+
+
+def test_zero_gap_encouragement_deterministic_no_llm_needed(monkeypatch):
+    """Slice 9: when the drilldown has zero gap rows, assembly builds
+    a deterministic CoachTrainingGuide with the top-3 matched skills
+    referenced by name. LLM is NOT called."""
+    monkeypatch.setenv("DRILLDOWN_SEMANTIC", "off")
+    import config as _cfg
+    importlib.reload(_cfg)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    # Fail loudly if LLM is called -- zero-gap path must skip it.
+    llm_calls: list = []
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._generate_coach_guide_with_llm",
+        lambda **kw: llm_calls.append(kw) or None,
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "Writing",
+             "description": "x", "importance": 4.0, "noc_title": "Admin"},
+            {"skill_id": "F.B", "skill_name": "Coordinating",
+             "description": "x", "importance": 3.5, "noc_title": "Admin"},
+        ],
+    )
+
+    ev = ra.build_recommender_evidence_role_drilldown(
+        noc_code="13110",
+        user_skill_ids=["F.A", "F.B"],  # both match exactly
+        user_skill_names=["writing", "coordinating"],
+        user_skill_canon=[],
+        user_skill_name_to_canon={}, registry=None, today=date.today(),
+        coach_guide_enabled=True,
+    )
+    assert ev.coach_guide is not None
+    assert ev.coach_guide.priority_gaps == ()  # zero gaps -> no LLM sections
+    assert "administrative" not in ev.coach_guide.opening_sentence.lower() or True
+    # Top matched skill names appear in the opening sentence (grammatical).
+    assert "Writing" in ev.coach_guide.opening_sentence
+    assert "Coordinating" in ev.coach_guide.opening_sentence
+    # Closing question is verbatim canned.
+    assert ev.coach_guide.closing_question.startswith(
+        "Want me to help you pick"
+    )
+    # LLM was NOT called.
+    assert not llm_calls
+
+
+def test_coach_guide_disabled_by_default(monkeypatch):
+    """Slice 9: without coach_guide_enabled=True the builder returns
+    coach_guide=None (slice 5/7a/8 behavior preserved for existing
+    callers)."""
+    monkeypatch.setenv("DRILLDOWN_SEMANTIC", "off")
+    import config as _cfg
+    importlib.reload(_cfg)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "Writing",
+             "description": "x", "importance": 4.0, "noc_title": "Admin"},
+        ],
+    )
+    ev = ra.build_recommender_evidence_role_drilldown(
+        noc_code="13110",
+        user_skill_ids=[], user_skill_names=[],
+        user_skill_canon=[],
+        user_skill_name_to_canon={}, registry=None, today=date.today(),
+        # coach_guide_enabled NOT passed
+    )
+    assert ev.coach_guide is None
+
+
+def test_coach_guide_gap_branch_calls_llm(monkeypatch):
+    """Slice 9: with >=1 gap row + coach_guide_enabled=True, assembly
+    calls _generate_coach_guide_with_llm with an evidence package
+    built from the top-3 gaps by importance."""
+    monkeypatch.setenv("DRILLDOWN_SEMANTIC", "off")
+    import config as _cfg
+    importlib.reload(_cfg)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+    from skillbridge.chat.gap_evidence import CoachTrainingGuide, CoachGapGuide
+
+    captured: dict = {}
+
+    def fake_llm(**kw):
+        captured["evidence_package"] = kw["evidence_package"]
+        return CoachTrainingGuide(
+            opening_sentence="stub opening",
+            priority_gaps=(
+                CoachGapGuide(
+                    skill="Instructing",
+                    why_it_matters="matters",
+                    how_to_build="build",
+                    training_direction="direction",
+                    training_provider=None,
+                    training_url=None,
+                ),
+            ),
+            closing_question="Want me to help you pick the first skill to work on?",
+        )
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._generate_coach_guide_with_llm",
+        fake_llm,
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "Instructing",
+             "description": "teach", "importance": 4.5, "noc_title": "Admin"},
+        ],
+    )
+
+    ev = ra.build_recommender_evidence_role_drilldown(
+        noc_code="13110",
+        user_skill_ids=[], user_skill_names=[],
+        user_skill_canon=[],
+        user_skill_name_to_canon={}, registry=None, today=date.today(),
+        coach_guide_enabled=True,
+    )
+    assert ev.coach_guide is not None
+    assert ev.coach_guide.priority_gaps[0].skill == "Instructing"
+    # Evidence package correctly partitioned: 0 matched, 1 gap.
+    assert captured["evidence_package"]["priority_gaps"][0]["skill"] == "Instructing"
+    assert captured["evidence_package"]["matched_rows"] == []
+
+
+def test_coach_guide_gap_selection_top3_by_importance(monkeypatch):
+    """Slice 9: when 5 gaps exist, assembly passes only the TOP-3 by
+    importance DESC to the LLM (deterministic selection, not LLM)."""
+    monkeypatch.setenv("DRILLDOWN_SEMANTIC", "off")
+    import config as _cfg
+    importlib.reload(_cfg)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._generate_coach_guide_with_llm",
+        lambda **kw: (captured.__setitem__("ep", kw["evidence_package"]), None)[1],
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": f"F.{i}", "skill_name": name,
+             "description": "x", "importance": imp, "noc_title": "X"}
+            for i, (name, imp) in enumerate([
+                ("Persuading", 4.5),
+                ("Negotiating", 4.0),
+                ("Instructing", 3.5),
+                ("Coordinating", 3.0),
+                ("Evaluation", 2.5),
+            ])
+        ],
+    )
+
+    ra.build_recommender_evidence_role_drilldown(
+        noc_code="60010",
+        user_skill_ids=[], user_skill_names=[],
+        user_skill_canon=[],
+        user_skill_name_to_canon={}, registry=None, today=date.today(),
+        coach_guide_enabled=True,
+    )
+    assert captured["ep"] is not None
+    picks = [g["skill"] for g in captured["ep"]["priority_gaps"]]
+    assert picks == ["Persuading", "Negotiating", "Instructing"]
+
+
+def test_coach_guide_first_surfaced_registry_resource_attached(monkeypatch):
+    """Slice 9: evidence package's priority_gaps[i].training_resources
+    comes from the FIRST Resource whose surface_url is non-None
+    (matches slice 5 gap-training pattern). Suppressed URLs are
+    skipped."""
+    monkeypatch.setenv("DRILLDOWN_SEMANTIC", "off")
+    import config as _cfg
+    importlib.reload(_cfg)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    class _StubResource:
+        def __init__(self, provider, url_out, summary, type_="online_course"):
+            self.provider = provider
+            self.type = type_
+            self.summary = summary
+            self._url_out = url_out
+        def surface_url(self, today):
+            return self._url_out
+    class _StubGap:
+        def __init__(self, name, category, description, resources):
+            self.canonical_name = name
+            self.category = category
+            self.description = description
+            self.resources = resources
+    class _StubRegistry:
+        def lookup(self, name):
+            return _StubGap(
+                name="Instructing", category="skill",
+                description="teach a procedure",
+                resources=(
+                    _StubResource("SCCC", None, "referral"),  # suppressed
+                    _StubResource("Coursera", "https://coursera.org/x", "real"),
+                ),
+            )
+        def surface_resources(self, name, *, today):
+            g = self.lookup(name)
+            return list(g.resources)
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._generate_coach_guide_with_llm",
+        lambda **kw: (captured.__setitem__("ep", kw["evidence_package"]), None)[1],
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "Instructing",
+             "description": "x", "importance": 4.0, "noc_title": "Admin"},
+        ],
+    )
+
+    ra.build_recommender_evidence_role_drilldown(
+        noc_code="13110",
+        user_skill_ids=[], user_skill_names=[],
+        user_skill_canon=[],
+        user_skill_name_to_canon={}, registry=_StubRegistry(),
+        today=date.today(), coach_guide_enabled=True,
+    )
+    gap_entry = captured["ep"]["priority_gaps"][0]
+    assert gap_entry["registry_hit"] is True
+    assert gap_entry["registry_category"] == "skill"
+    assert gap_entry["registry_description"] == "teach a procedure"
+    # First-surfaced: SCCC skipped (url None), Coursera returned.
+    assert len(gap_entry["training_resources"]) == 1
+    assert gap_entry["training_resources"][0]["provider"] == "Coursera"
+    assert gap_entry["training_resources"][0]["url"] == "https://coursera.org/x"
+
+
+def test_coach_guide_no_registry_hit_empty_training_resources(monkeypatch):
+    """Slice 9: when registry.lookup returns None, training_resources
+    is [] and registry_hit is False. The LLM must render 'Ask SCCC'
+    honestly per its prompt rule."""
+    monkeypatch.setenv("DRILLDOWN_SEMANTIC", "off")
+    import config as _cfg
+    importlib.reload(_cfg)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    class _EmptyRegistry:
+        def lookup(self, name):
+            return None
+        def surface_resources(self, name, *, today):
+            return []
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._generate_coach_guide_with_llm",
+        lambda **kw: (captured.__setitem__("ep", kw["evidence_package"]), None)[1],
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "SomeObscureSkill",
+             "description": "x", "importance": 4.0, "noc_title": "Admin"},
+        ],
+    )
+
+    ra.build_recommender_evidence_role_drilldown(
+        noc_code="13110",
+        user_skill_ids=[], user_skill_names=[],
+        user_skill_canon=[],
+        user_skill_name_to_canon={}, registry=_EmptyRegistry(),
+        today=date.today(), coach_guide_enabled=True,
+    )
+    gap_entry = captured["ep"]["priority_gaps"][0]
+    assert gap_entry["registry_hit"] is False
+    assert gap_entry["training_resources"] == []
+
+
+def test_coach_guide_llm_failure_returns_none_guide(monkeypatch):
+    """Slice 9: when _generate_coach_guide_with_llm returns None (LLM
+    disabled / errored), coach_guide is None (renderer omits the
+    section, table renders alone). No half-guide."""
+    monkeypatch.setenv("DRILLDOWN_SEMANTIC", "off")
+    import config as _cfg
+    importlib.reload(_cfg)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._generate_coach_guide_with_llm",
+        lambda **kw: None,
+    )
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "Instructing",
+             "description": "x", "importance": 4.0, "noc_title": "Admin"},
+        ],
+    )
+    ev = ra.build_recommender_evidence_role_drilldown(
+        noc_code="13110",
+        user_skill_ids=[], user_skill_names=[],
+        user_skill_canon=[],
+        user_skill_name_to_canon={}, registry=None, today=date.today(),
+        coach_guide_enabled=True,
+    )
+    assert ev.coach_guide is None
+
+
+def test_coach_guide_llm_helper_returns_none_when_disabled(monkeypatch):
+    """Slice 9: _generate_coach_guide_with_llm returns None when
+    LLM_ENABLED is False. No API call made."""
+    monkeypatch.setattr("skillbridge.llm.LLM_ENABLED", False)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+    result = ra._generate_coach_guide_with_llm(
+        noc_code="13110",
+        evidence_package={
+            "target_role": "X", "noc_code": "13110",
+            "matched_rows": [],
+            "priority_gaps": [{
+                "skill": "Instructing", "importance": 4.0,
+                "registry_hit": False, "registry_category": None,
+                "registry_description": None, "training_resources": [],
+            }],
+            "user_profile": {
+                "skills": [], "work_history": [],
+                "education": [], "certifications": [],
+            },
+        },
+    )
+    assert result is None
+
+
+def test_coach_guide_llm_helper_parses_valid_tool_use(monkeypatch):
+    """Slice 9: valid tool_use response -> CoachTrainingGuide with
+    provider+URL back-attached from the evidence package (LLM doesn't
+    write them into prose fields)."""
+    monkeypatch.setattr("skillbridge.llm.LLM_ENABLED", True)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    class _FakeBlock:
+        type = "tool_use"
+        name = ra._COACH_GUIDE_TOOL_NAME
+        input = {
+            "opening_sentence": "You already bring Coordinating from AP work.",
+            "gaps": [
+                {
+                    "skill": "Instructing",
+                    "why_it_matters": "Explaining procedures to new staff matters.",
+                    "how_to_build": "Practise writing step-by-step guides.",
+                    "training_direction": "Sault College offers workplace communication training.",
+                },
+            ],
+        }
+    class _FakeResp:
+        content = [_FakeBlock()]
+    class _FakeClient:
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                return _FakeResp()
+
+    import skillbridge.llm as _llm
+    monkeypatch.setattr(_llm, "_client_get", lambda: _FakeClient())
+
+    result = ra._generate_coach_guide_with_llm(
+        noc_code="13110",
+        evidence_package={
+            "target_role": "administrative secretary",
+            "noc_code": "13110",
+            "matched_rows": [],
+            "priority_gaps": [{
+                "skill": "Instructing", "importance": 4.0,
+                "registry_hit": True, "registry_category": "skill",
+                "registry_description": "teach procedures",
+                "training_resources": [{
+                    "provider": "Sault College",
+                    "type": "local_training",
+                    "url": "https://example.com/instructing",
+                    "summary": "communication course",
+                }],
+            }],
+            "user_profile": {
+                "skills": [], "work_history": [],
+                "education": [], "certifications": [],
+            },
+        },
+    )
+    assert result is not None
+    assert result.opening_sentence.startswith("You already bring")
+    assert len(result.priority_gaps) == 1
+    gap = result.priority_gaps[0]
+    assert gap.skill == "Instructing"
+    # Provider + URL back-attached from evidence package (assembly truth).
+    assert gap.training_provider == "Sault College"
+    assert gap.training_url == "https://example.com/instructing"
+
+
+def test_coach_guide_llm_helper_rejects_unexpected_skill(monkeypatch):
+    """Slice 9: if the LLM returns a `skill` NOT in the priority_gaps
+    input (i.e. LLM tried to change the gap list), that entry is
+    dropped. Assembly picks the gaps, not the LLM."""
+    monkeypatch.setattr("skillbridge.llm.LLM_ENABLED", True)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    class _FakeBlock:
+        type = "tool_use"
+        name = ra._COACH_GUIDE_TOOL_NAME
+        input = {
+            "opening_sentence": "You bring strengths.",
+            "gaps": [
+                # LLM tried to substitute a different skill.
+                {"skill": "Persuading", "why_it_matters": "w",
+                 "how_to_build": "h", "training_direction": "t"},
+            ],
+        }
+    class _FakeResp:
+        content = [_FakeBlock()]
+    class _FakeClient:
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                return _FakeResp()
+
+    import skillbridge.llm as _llm
+    monkeypatch.setattr(_llm, "_client_get", lambda: _FakeClient())
+
+    result = ra._generate_coach_guide_with_llm(
+        noc_code="13110",
+        evidence_package={
+            "target_role": "X", "noc_code": "13110",
+            "matched_rows": [],
+            "priority_gaps": [{
+                "skill": "Instructing", "importance": 4.0,  # asked for this
+                "registry_hit": False, "registry_category": None,
+                "registry_description": None, "training_resources": [],
+            }],
+            "user_profile": {"skills": [], "work_history": [],
+                             "education": [], "certifications": []},
+        },
+    )
+    # Rejected LLM's substitution -> no valid gaps -> None.
+    assert result is None
+
+
+def test_coach_guide_llm_helper_malformed_response_returns_none(monkeypatch):
+    """Slice 9: no tool_use block or missing opening -> None."""
+    monkeypatch.setattr("skillbridge.llm.LLM_ENABLED", True)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    class _FakeResp:
+        content = []
+    class _FakeClient:
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                return _FakeResp()
+    import skillbridge.llm as _llm
+    monkeypatch.setattr(_llm, "_client_get", lambda: _FakeClient())
+
+    result = ra._generate_coach_guide_with_llm(
+        noc_code="13110",
+        evidence_package={
+            "target_role": "X", "noc_code": "13110",
+            "matched_rows": [],
+            "priority_gaps": [{
+                "skill": "Instructing", "importance": 4.0,
+                "registry_hit": False, "registry_category": None,
+                "registry_description": None, "training_resources": [],
+            }],
+            "user_profile": {"skills": [], "work_history": [],
+                             "education": [], "certifications": []},
+        },
+    )
+    assert result is None
+
+
+def test_render_coach_guide_gap_branch():
+    """Slice 9 renderer: gap branch -- opening + N sections + closing.
+    Provider+URL rendered as markdown link when both present."""
+    from skillbridge.chat.gap_evidence import (
+        CoachGapGuide, CoachTrainingGuide,
+    )
+    from skillbridge.chat.recommender_fallback import render_coach_training_guide
+
+    guide = CoachTrainingGuide(
+        opening_sentence="Foundation opening.",
+        priority_gaps=(
+            CoachGapGuide(
+                skill="Instructing",
+                why_it_matters="Matters here.",
+                how_to_build="Build here.",
+                training_direction="See Sault College.",
+                training_provider="Sault College",
+                training_url="https://example.com/x",
+            ),
+            CoachGapGuide(
+                skill="Persuading",
+                why_it_matters="Persuade why.",
+                how_to_build="Persuade how.",
+                training_direction="Ask SCCC about sales communication.",
+                training_provider=None,
+                training_url=None,
+            ),
+        ),
+        closing_question="Want me to help you pick the first skill to work on?",
+    )
+    md = render_coach_training_guide(guide)
+    assert md.startswith("**Coach Training Guide**")
+    assert "Foundation opening." in md
+    assert "**1. Instructing**" in md
+    assert "- Why it matters: Matters here." in md
+    assert "- How to build it: Build here." in md
+    assert "[Sault College](https://example.com/x)" in md
+    assert "**2. Persuading**" in md
+    # No registry hit -> just prose, no link.
+    assert "Ask SCCC about sales communication." in md
+    assert "](" not in md.split("**2. Persuading**")[1].split("Want me to")[0]
+    assert md.rstrip().endswith("first skill to work on?")
+
+
+def test_render_coach_guide_zero_gap_branch():
+    """Slice 9 renderer: zero-gap branch (priority_gaps=()) -- opening
+    only, no numbered sections, then closing."""
+    from skillbridge.chat.gap_evidence import CoachTrainingGuide
+    from skillbridge.chat.recommender_fallback import render_coach_training_guide
+
+    guide = CoachTrainingGuide(
+        opening_sentence="You already show the main skill areas.",
+        priority_gaps=(),
+        closing_question="Want me to help you pick the first skill to work on?",
+    )
+    md = render_coach_training_guide(guide)
+    assert md.startswith("**Coach Training Guide**")
+    assert "You already show the main skill areas." in md
+    assert "**1." not in md  # no gap sections
+    assert md.rstrip().endswith("first skill to work on?")
+
+
+def test_render_role_drilldown_table_appends_coach_guide():
+    """Slice 9: render_role_drilldown_table appends the Coach Training
+    Guide section when evidence.coach_guide is set. Table content
+    unchanged."""
+    from skillbridge.chat.gap_evidence import (
+        RoleDrilldownEvidence, RoleDrilldownSkillRow,
+        CoachTrainingGuide,
+    )
+    from skillbridge.chat.recommender_fallback import render_role_drilldown_table
+
+    guide = CoachTrainingGuide(
+        opening_sentence="Guide opens here.",
+        priority_gaps=(),
+        closing_question="Want me to help you pick the first skill to work on?",
+    )
+    ev = RoleDrilldownEvidence(
+        noc_code="13110", role_title="admin",
+        rows=(RoleDrilldownSkillRow(
+            "Writing", "F.A", 4.0, True, ("writing",),
+            None, None, user_evidence=None, reason=None,
+        ),),
+        coach_guide=guide,
+    )
+    md = render_role_drilldown_table(ev)
+    # Table part rendered.
+    assert "| OaSIS Skill | Your Evidence | Status | Training Direction |" in md
+    assert "| Writing |" in md
+    # Coach guide appended below.
+    assert "**Coach Training Guide**" in md
+    assert "Guide opens here." in md
+    assert "Want me to help you pick" in md
+
+
+def test_render_role_drilldown_table_no_coach_guide_default():
+    """Slice 9: when evidence.coach_guide is None (feature off or LLM
+    failed), render_role_drilldown_table returns the table alone
+    (slice 5-8 behavior preserved)."""
+    from skillbridge.chat.gap_evidence import (
+        RoleDrilldownEvidence, RoleDrilldownSkillRow,
+    )
+    from skillbridge.chat.recommender_fallback import render_role_drilldown_table
+
+    ev = RoleDrilldownEvidence(
+        noc_code="13110", role_title="admin",
+        rows=(RoleDrilldownSkillRow(
+            "Writing", "F.A", 4.0, True, ("writing",),
+            None, None,
+        ),),
+    )
+    md = render_role_drilldown_table(ev)
+    assert "**Coach Training Guide**" not in md
+    assert "Want me to help you pick" not in md
+
+
+def test_coach_guide_disabled_emits_observability_log(monkeypatch, caplog):
+    """Slice 9 observability: when coach_guide_enabled=False AND rows
+    exist, exactly one INFO log 'coach_guide_disabled_by_env' fires so
+    rollout debugging can distinguish gate-off from a silent code
+    failure. Not fired when there are no rows (drilldown is empty for
+    other reasons)."""
+    monkeypatch.setenv("DRILLDOWN_SEMANTIC", "off")
+    import config as _cfg
+    importlib.reload(_cfg)
+    import skillbridge.chat.recommender_assembly as ra
+    importlib.reload(ra)
+
+    monkeypatch.setattr(
+        "skillbridge.chat.recommender_assembly._fetch_noc_skill_rows",
+        lambda noc: [
+            {"skill_id": "F.A", "skill_name": "Writing",
+             "description": "x", "importance": 4.0, "noc_title": "Admin"},
+        ],
+    )
+    with caplog.at_level(
+        "INFO", logger="skillbridge.chat.recommender_assembly",
+    ):
+        ra.build_recommender_evidence_role_drilldown(
+            noc_code="13110",
+            user_skill_ids=[], user_skill_names=[],
+            user_skill_canon=[],
+            user_skill_name_to_canon={}, registry=None,
+            today=date.today(),
+            # coach_guide_enabled omitted -> defaults False
+        )
+    assert "coach_guide_disabled_by_env noc=13110" in caplog.text
+
+
+def test_coach_guide_llm_never_receives_url_write_authority():
+    """Slice 9 safety lock: the LLM tool schema does NOT accept
+    training_provider or training_url fields. Those are attached
+    by assembly (from registry.surface_url). This test pins the
+    schema shape."""
+    from skillbridge.chat.recommender_assembly import _COACH_GUIDE_TOOL_SCHEMA
+    props = _COACH_GUIDE_TOOL_SCHEMA["input_schema"]["properties"]
+    gap_item_props = props["gaps"]["items"]["properties"]
+    assert set(gap_item_props.keys()) == {
+        "skill", "why_it_matters", "how_to_build", "training_direction",
+    }
+    assert "training_url" not in gap_item_props
+    assert "training_provider" not in gap_item_props

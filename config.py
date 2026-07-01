@@ -163,6 +163,32 @@ DRILLDOWN_SEMANTIC_MODE: str = (
 )
 
 
+# ------------------------------------------------- Coach Training Guide gate
+# Slice 9 (2026-06-30): DRILLDOWN_COACH_GUIDE binary env var that gates
+# whether the drilldown assembly generates a Coach Training Guide section
+# beneath the skill-comparison table.
+#
+# Values (case-insensitive, whitespace-tolerant, bad -> off defensively):
+#   off  -- coach guide NOT generated. Table renders alone.
+#           Production-safe default during rollout.
+#   on   -- coach guide generated:
+#             * Zero gaps: deterministic encouragement template
+#               referencing the top-3 matched skills. No LLM call.
+#             * >=1 gap: one Anthropic tool_use call per drilldown,
+#               ~$0.01 per turn, ~2-4s added latency.
+#
+# Rollout: deploy off -> flip to on locally + live verify -> deploy on.
+_DRILLDOWN_COACH_GUIDE_RAW = os.environ.get(
+    "DRILLDOWN_COACH_GUIDE", "off",
+).strip().lower()
+_DRILLDOWN_COACH_GUIDE_VALID: set[str] = {"off", "on"}
+DRILLDOWN_COACH_GUIDE_MODE: str = (
+    _DRILLDOWN_COACH_GUIDE_RAW
+    if _DRILLDOWN_COACH_GUIDE_RAW in _DRILLDOWN_COACH_GUIDE_VALID
+    else "off"
+)
+
+
 # ------------------------------------------------- Deterministic message routing
 # Gates whether the handler runs the deterministic `route_from_understanding`
 # layer (chat orchestration v2.1) before the planner LLM call. When OFF

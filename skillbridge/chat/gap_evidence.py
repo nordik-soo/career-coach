@@ -739,6 +739,62 @@ class RoleDrilldownSkillRow:
 
 
 @dataclass(frozen=True, slots=True)
+class CoachGapGuide:
+    """Slice 9 (2026-06-30): one priority gap in the Coach Training Guide.
+
+    Written by the LLM coach pass for gap rows only. The assembly layer
+    picks top-N gap rows by importance DESC (NULLS LAST) and passes them
+    to the LLM; the LLM writes the three prose fields (why_it_matters,
+    how_to_build, training_direction) grounded in the evidence package.
+
+    Fields:
+      skill: OaSIS canonical skill name; MUST match a gap row's
+        oasis_skill_name verbatim (assembly-enforced).
+      why_it_matters: 1 sentence tying the skill to the target role.
+      how_to_build: 1 practical action sentence.
+      training_direction: LLM-written prose that either names the
+        (verified) provider + URL from the evidence package OR falls
+        back to "Ask SCCC about <topic>" when no registry hit.
+      training_provider: canonical provider name for markdown link
+        rendering (populated by assembly from the registry, NOT the
+        LLM). None when no registry hit.
+      training_url: url from Resource.surface_url(today) (populated by
+        assembly, NOT the LLM). None when no registry hit or when URL
+        is suppressed (pending/stale/referral_only).
+    """
+    skill: str
+    why_it_matters: str
+    how_to_build: str
+    training_direction: str
+    training_provider: str | None
+    training_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CoachTrainingGuide:
+    """Slice 9 (2026-06-30): the Coach Training Guide section appended
+    beneath the drilldown table.
+
+    Two modes based on the drilldown's matched/gap partition:
+      - priority_gaps non-empty: 1-3 gap sections written by the LLM
+        (opening_sentence also LLM-written to tie strengths to role).
+      - priority_gaps empty (all rows matched): opening_sentence is a
+        DETERMINISTIC encouragement template referencing the top-3
+        matched skills; no LLM call was made.
+
+    closing_question is a canned prompt ("Want me to help you pick the
+    first skill to work on?") -- consistent across all coach guides.
+
+    Empty tuple for priority_gaps distinguishes "all matched, LLM
+    skipped" from "gaps exist, LLM ran" -- both surface the guide, but
+    the section body differs.
+    """
+    opening_sentence: str
+    priority_gaps: tuple[CoachGapGuide, ...]
+    closing_question: str
+
+
+@dataclass(frozen=True, slots=True)
 class RoleDrilldownEvidence:
     """Slice 5 payload for adjacent_role_drilldown render mode.
 
@@ -748,7 +804,14 @@ class RoleDrilldownEvidence:
     Empty `rows` means the OaSIS profile for this NOC isn't loaded
     -- the renderer emits an honest fallback canned text instead of
     a table.
+
+    Slice 9 (2026-06-30) added `coach_guide` -- the Coach Training
+    Guide section appended below the table when
+    DRILLDOWN_COACH_GUIDE_MODE=on. None when the feature is off, LLM
+    was unavailable and no gaps existed for the deterministic branch,
+    or the drilldown had no rows at all.
     """
     noc_code: str
     role_title: str
     rows: tuple[RoleDrilldownSkillRow, ...]
+    coach_guide: CoachTrainingGuide | None = None

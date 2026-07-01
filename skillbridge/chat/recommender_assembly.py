@@ -933,6 +933,418 @@ def _judge_drilldown_with_llm(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Slice 9 (2026-06-30) -- Coach Training Guide (below-the-table action plan)
+# ---------------------------------------------------------------------------
+# Deterministic top-N gap selection + registry-backed evidence package +
+# one Anthropic tool_use call for coach prose + deterministic renderer.
+#
+# Zero-gap case: deterministic encouragement template referencing the
+# top-3 matched skills. No LLM call.
+_MAX_PRIORITY_GAPS: int = 3
+_MAX_MATCHED_IN_ENCOURAGEMENT: int = 3
+_MAX_MATCHED_ROWS_TO_LLM: int = 7  # cap on strengths context
+_COACH_CLOSING_QUESTION: str = "Want me to help you pick the first skill to work on?"
+
+_COACH_GUIDE_TOOL_NAME: str = "emit_coach_training_guide"
+_COACH_GUIDE_TOOL_SCHEMA: dict = {
+    "name": _COACH_GUIDE_TOOL_NAME,
+    "description": (
+        "Emit the Coach Training Guide section for the drilldown. "
+        "Write one opening sentence + one gap section per priority_gap "
+        "in the order given. Do NOT reorder, invent providers/URLs, "
+        "or add closing text -- the renderer appends it verbatim."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "opening_sentence": {"type": "string"},
+            "gaps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "skill": {"type": "string"},
+                        "why_it_matters": {"type": "string"},
+                        "how_to_build": {"type": "string"},
+                        "training_direction": {"type": "string"},
+                    },
+                    "required": [
+                        "skill", "why_it_matters",
+                        "how_to_build", "training_direction",
+                    ],
+                },
+            },
+        },
+        "required": ["opening_sentence", "gaps"],
+    },
+}
+
+
+def _sort_rows_by_importance(
+    rows: Iterable["RoleDrilldownSkillRow"],
+) -> list["RoleDrilldownSkillRow"]:
+    """Slice 9: importance DESC, None LAST.
+
+    Python 3 can't compare None to float directly, so the key tuple
+    puts None-importance rows in the None-last bucket, then sorts
+    numeric rows by negated importance so higher values come first.
+    """
+    return sorted(
+        rows,
+        key=lambda r: (
+            r.importance is None,
+            -(r.importance if r.importance is not None else 0.0),
+        ),
+    )
+
+
+def _format_matched_skill_list(names: list[str]) -> str:
+    """Slice 9: grammatical Oxford-comma joiner for 1/2/3 skill names.
+
+    - 1 name: "Writing"
+    - 2 names: "Writing and Coordinating"
+    - 3+ names: "Writing, Coordinating, and Digital Literacy"
+      (extra items truncated -- caller passes top-N already)
+    """
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    head = ", ".join(names[:-1])
+    return f"{head}, and {names[-1]}"
+
+
+def _build_zero_gap_encouragement(
+    *,
+    role_title: str,
+    matched_rows: list["RoleDrilldownSkillRow"],
+) -> "CoachTrainingGuide":
+    """Slice 9: deterministic encouragement when the drilldown has zero
+    gap rows. No LLM call. Names the top-3 matched skills by importance
+    and prompts the user to turn matches into resume/interview proof.
+    """
+    from skillbridge.chat.gap_evidence import CoachTrainingGuide
+
+    top_matched = _sort_rows_by_importance(matched_rows)[
+        :_MAX_MATCHED_IN_ENCOURAGEMENT
+    ]
+    names_list = _format_matched_skill_list(
+        [r.oasis_skill_name for r in top_matched]
+    )
+    if names_list:
+        opening = (
+            f"You already show the main skill areas for {role_title}. "
+            f"The next step is to turn that into proof: add one resume "
+            f"bullet or interview example showing how you used "
+            f"{names_list} in your work."
+        )
+    else:
+        opening = (
+            f"You show the main skill areas for {role_title}. The "
+            f"next step is to turn that into proof: add one resume "
+            f"bullet or interview example that names those strengths."
+        )
+    return CoachTrainingGuide(
+        opening_sentence=opening,
+        priority_gaps=(),
+        closing_question=_COACH_CLOSING_QUESTION,
+    )
+
+
+def _build_coach_evidence_package(
+    *,
+    role_title: str,
+    noc_code: str,
+    matched_rows: list["RoleDrilldownSkillRow"],
+    priority_gap_rows: list["RoleDrilldownSkillRow"],
+    registry: "TrainingRegistry | None",
+    today: date,
+    user_skill_names: list[str],
+    user_work_history: list,
+    user_education: list,
+    user_certifications: list,
+) -> dict:
+    """Slice 9: assemble the evidence package the LLM receives.
+
+    Pre-filters everything so the LLM cannot invent a provider or URL:
+      * priority_gaps carry the FIRST fresh registry resource (via
+        Resource.surface_url(today)) if any -- LLM cites verbatim.
+      * priority_gaps also carry registry_description + registry_category
+        so the "why it matters" line is grounded.
+      * matched_rows are capped at _MAX_MATCHED_ROWS_TO_LLM (7) and
+        sorted by importance DESC so the LLM references the strongest
+        first when writing opening_sentence.
+    """
+    matched_capped = _sort_rows_by_importance(matched_rows)[
+        :_MAX_MATCHED_ROWS_TO_LLM
+    ]
+    matched_payload = [
+        {
+            "skill": r.oasis_skill_name,
+            "importance": r.importance,
+            "user_evidence": r.user_evidence,
+        }
+        for r in matched_capped
+    ]
+
+    gaps_payload = []
+    for r in priority_gap_rows:
+        gap_entry: dict = {
+            "skill": r.oasis_skill_name,
+            "importance": r.importance,
+            "registry_hit": False,
+            "registry_category": None,
+            "registry_description": None,
+            "training_resources": [],
+        }
+        if registry is not None:
+            try:
+                gap = registry.lookup(r.oasis_skill_name)
+            except Exception:  # noqa: BLE001
+                gap = None
+                log.warning(
+                    "coach_guide_registry_lookup_failed skill=%r",
+                    r.oasis_skill_name,
+                )
+            if gap is not None:
+                gap_entry["registry_hit"] = True
+                gap_entry["registry_category"] = gap.category
+                gap_entry["registry_description"] = gap.description
+                # First-surfaced pattern: iterate registry.surface_resources
+                # in YAML order and take the first Resource whose
+                # surface_url is non-None (matches existing drilldown
+                # gap-training lookup at recommender_assembly.py ~L1170).
+                try:
+                    resources = registry.surface_resources(
+                        r.oasis_skill_name, today=today,
+                    )
+                except Exception:  # noqa: BLE001
+                    resources = []
+                    log.warning(
+                        "coach_guide_surface_resources_failed skill=%r",
+                        r.oasis_skill_name,
+                    )
+                for res in resources:
+                    url = res.surface_url(today)
+                    if url:
+                        gap_entry["training_resources"].append({
+                            "provider": res.provider,
+                            "type": res.type,
+                            "url": url,
+                            "summary": res.summary,
+                        })
+                        break  # first-surfaced only
+        gaps_payload.append(gap_entry)
+
+    return {
+        "target_role": role_title,
+        "noc_code": noc_code,
+        "matched_rows": matched_payload,
+        "priority_gaps": gaps_payload,
+        "user_profile": {
+            "skills": list(user_skill_names),
+            "work_history": user_work_history or [],
+            "education": user_education or [],
+            "certifications": user_certifications or [],
+        },
+    }
+
+
+def _generate_coach_guide_with_llm(
+    *,
+    noc_code: str,
+    evidence_package: dict,
+) -> "CoachTrainingGuide | None":
+    """Slice 9: one Anthropic tool_use call for the Coach Training Guide.
+
+    Returns:
+        CoachTrainingGuide when the LLM call succeeds and produces a
+        parseable structured payload. None on any failure (LLM disabled
+        / call errored / invalid tool output / gap count mismatch).
+
+    On None, the caller falls through to the None coach_guide branch
+    -- the table renders alone (no misleading half-guide).
+    """
+    import json as _json
+    from skillbridge.chat.gap_evidence import (
+        CoachGapGuide,
+        CoachTrainingGuide,
+    )
+
+    try:
+        from skillbridge.llm import LLM_ENABLED, LLM_MODEL, LLM_FALLBACK_MODEL
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "coach_guide_llm_failed reason=llm_module_import_failed "
+            "degrading=no_guide",
+        )
+        return None
+
+    if not LLM_ENABLED:
+        log.info(
+            "coach_guide_llm_disabled noc=%s -- guide will be omitted",
+            noc_code,
+        )
+        return None
+
+    try:
+        import anthropic  # noqa: F401
+        from skillbridge.llm import _client_get
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "coach_guide_llm_failed reason=anthropic_client_unavailable "
+            "degrading=no_guide",
+        )
+        return None
+
+    from skillbridge.chat.prompts import DRILLDOWN_COACH_GUIDE_PROMPT
+
+    priority_gaps_input = evidence_package.get("priority_gaps") or []
+    expected_gap_skills = [g["skill"] for g in priority_gaps_input]
+
+    user_block = _json.dumps(
+        {"evidence_package": evidence_package},
+        ensure_ascii=False, indent=2,
+    )
+
+    system_blocks = [{
+        "type": "text",
+        "text": DRILLDOWN_COACH_GUIDE_PROMPT,
+        "cache_control": {"type": "ephemeral"},
+    }]
+
+    def _do_call(model: str):
+        client = _client_get()
+        return client.messages.create(
+            model=model,
+            max_tokens=1400,
+            temperature=0,
+            system=system_blocks,
+            tools=[_COACH_GUIDE_TOOL_SCHEMA],
+            tool_choice={"type": "tool", "name": _COACH_GUIDE_TOOL_NAME},
+            messages=[{"role": "user", "content": user_block}],
+        )
+
+    try:
+        import anthropic
+        try:
+            resp = _do_call(LLM_MODEL)
+        except anthropic.APIStatusError as e:
+            if (e.status_code in (429, 529, 503)
+                    and LLM_MODEL != LLM_FALLBACK_MODEL):
+                log.warning(
+                    "coach_guide llm overloaded on %s; falling back to %s",
+                    LLM_MODEL, LLM_FALLBACK_MODEL,
+                )
+                resp = _do_call(LLM_FALLBACK_MODEL)
+            else:
+                raise
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "coach_guide_llm_failed reason=llm_call_failed "
+            "degrading=no_guide", exc_info=True,
+        )
+        return None
+
+    tool_input = None
+    for block in resp.content:
+        block_type = getattr(block, "type", None)
+        if block_type == "tool_use":
+            tool_name = getattr(block, "name", None)
+            if tool_name != _COACH_GUIDE_TOOL_NAME:
+                continue
+            tool_input = getattr(block, "input", None)
+            break
+
+    if not isinstance(tool_input, dict):
+        log.warning(
+            "coach_guide_invalid_output reason=no_tool_use_block "
+            "degrading=no_guide",
+        )
+        return None
+
+    opening = tool_input.get("opening_sentence")
+    gaps_raw = tool_input.get("gaps")
+    if not isinstance(opening, str) or not opening.strip():
+        log.warning(
+            "coach_guide_invalid_output reason=missing_opening_sentence",
+        )
+        return None
+    if not isinstance(gaps_raw, list):
+        log.warning(
+            "coach_guide_invalid_output reason=gaps_not_list",
+        )
+        return None
+
+    # LLM must produce one entry per priority_gap in the same order.
+    # Index by skill (verbatim match) and fill in provider/URL from
+    # the evidence package -- the LLM did NOT receive those to write
+    # into training_direction (assembly attaches them for rendering).
+    expected_set = set(expected_gap_skills)
+    gap_records: dict[str, CoachGapGuide] = {}
+    for g in gaps_raw:
+        if not isinstance(g, dict):
+            continue
+        skill = g.get("skill")
+        if not isinstance(skill, str) or skill not in expected_set:
+            log.warning(
+                "coach_guide_invalid_output reason=unexpected_skill "
+                "skill=%r", skill,
+            )
+            continue
+        why = g.get("why_it_matters")
+        how = g.get("how_to_build")
+        td = g.get("training_direction")
+        if not all(isinstance(x, str) and x.strip() for x in (why, how, td)):
+            log.warning(
+                "coach_guide_invalid_output reason=missing_prose_field "
+                "skill=%r", skill,
+            )
+            continue
+        # Attach provider + URL from the evidence package (assembly-
+        # controlled truth, not LLM invention).
+        provider: str | None = None
+        url: str | None = None
+        for gap_entry in priority_gaps_input:
+            if gap_entry["skill"] == skill:
+                resources = gap_entry.get("training_resources") or []
+                if resources:
+                    provider = resources[0].get("provider")
+                    url = resources[0].get("url")
+                break
+        gap_records[skill] = CoachGapGuide(
+            skill=skill,
+            why_it_matters=why.strip(),
+            how_to_build=how.strip(),
+            training_direction=td.strip(),
+            training_provider=provider,
+            training_url=url,
+        )
+
+    # Preserve the input order (assembly-picked, importance DESC).
+    ordered_gaps = tuple(
+        gap_records[s] for s in expected_gap_skills if s in gap_records
+    )
+    if not ordered_gaps:
+        log.warning(
+            "coach_guide_invalid_output reason=no_valid_gaps_after_parse",
+        )
+        return None
+
+    log.info(
+        "coach_guide_ok noc=%s gaps_rendered=%d",
+        evidence_package.get("noc_code"), len(ordered_gaps),
+    )
+    return CoachTrainingGuide(
+        opening_sentence=opening.strip(),
+        priority_gaps=ordered_gaps,
+        closing_question=_COACH_CLOSING_QUESTION,
+    )
+
+
 def build_recommender_evidence_role_drilldown(
     *,
     noc_code: str,
@@ -951,6 +1363,11 @@ def build_recommender_evidence_role_drilldown(
     user_work_history: list | None = None,
     user_education: list | None = None,
     user_certifications: list | None = None,
+    # Slice 9 (2026-06-30): opt-in Coach Training Guide generation.
+    # False by default so slice 5/7a/8 callers + tests get unchanged
+    # behavior. Handler flips this to True when
+    # DRILLDOWN_COACH_GUIDE_MODE == "on".
+    coach_guide_enabled: bool = False,
 ) -> RoleDrilldownEvidence | None:
     """Slice 5: build the side-by-side OaSIS-vs-resume comparison
     payload for an adjacent role the user picked from Layer C's
@@ -1309,10 +1726,59 @@ def build_recommender_evidence_role_drilldown(
             # needed -- exact matches already have matched=True;
             # cosine-only rows already have matched=False.
 
+    # ----- Slice 9: Coach Training Guide -----------------------------
+    coach_guide = None
+    if not coach_guide_enabled and rows:
+        # Observability lock: absence of any coach_guide_* log line
+        # during rollout is ambiguous -- gate off vs code failure.
+        # A single explicit line resolves that fast.
+        log.info(
+            "coach_guide_disabled_by_env noc=%s -- table renders alone",
+            code,
+        )
+    if coach_guide_enabled and rows:
+        matched_rows_list = [r for r in rows if r.matched]
+        gap_rows_list = [r for r in rows if not r.matched]
+        priority_gap_rows = _sort_rows_by_importance(gap_rows_list)[
+            :_MAX_PRIORITY_GAPS
+        ]
+
+        if not priority_gap_rows:
+            # Zero-gap branch: deterministic encouragement, no LLM.
+            coach_guide = _build_zero_gap_encouragement(
+                role_title=role_title,
+                matched_rows=matched_rows_list,
+            )
+            log.info(
+                "coach_guide_zero_gap noc=%s matched=%d",
+                code, len(matched_rows_list),
+            )
+        else:
+            # Gap>=1 branch: LLM coach pass.
+            evidence_package = _build_coach_evidence_package(
+                role_title=role_title,
+                noc_code=code,
+                matched_rows=matched_rows_list,
+                priority_gap_rows=priority_gap_rows,
+                registry=registry,
+                today=today,
+                user_skill_names=user_names_list,
+                user_work_history=user_work_history or [],
+                user_education=user_education or [],
+                user_certifications=user_certifications or [],
+            )
+            coach_guide = _generate_coach_guide_with_llm(
+                noc_code=code,
+                evidence_package=evidence_package,
+            )
+            # coach_guide may be None if the LLM call failed; caller
+            # renders the table alone in that case (no half-guide).
+
     return RoleDrilldownEvidence(
         noc_code=code,
         role_title=role_title,
         rows=tuple(rows),
+        coach_guide=coach_guide,
     )
 
 

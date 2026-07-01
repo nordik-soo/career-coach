@@ -334,7 +334,71 @@ def render_role_drilldown_table(
     for row in evidence.rows:
         table_lines.append(_render_drilldown_row(row))
 
-    return heading + "\n".join(table_lines)
+    table_md = heading + "\n".join(table_lines)
+
+    # Slice 9 (2026-06-30): append the Coach Training Guide if
+    # attached. When evidence.coach_guide is None the table renders
+    # alone (feature off, LLM unavailable, or empty-rows guard above).
+    guide = getattr(evidence, "coach_guide", None)
+    if guide is not None:
+        return table_md + "\n\n" + render_coach_training_guide(guide)
+    return table_md
+
+
+def render_coach_training_guide(guide: "CoachTrainingGuide") -> str:
+    """Slice 9 (2026-06-30) deterministic renderer for the Coach
+    Training Guide section beneath the drilldown table.
+
+    Structure:
+      **Coach Training Guide**
+
+      <opening_sentence>
+
+      **1. <skill>**
+      - Why it matters: <why_it_matters>
+      - How to build it: <how_to_build>
+      - Training direction: <training_direction> [Provider](URL)
+
+      **2. <skill>** ... (only if 2+ priority_gaps)
+
+      <closing_question>
+
+    Zero-gap branch (priority_gaps == ()): only opening + closing
+    render. No gap sections. The opening sentence carries the
+    deterministic encouragement template written by
+    _build_zero_gap_encouragement.
+
+    Provider markdown link: appended verbatim ONLY when the guide's
+    CoachGapGuide row carries a non-None training_provider AND
+    training_url (attached by assembly from the registry, NOT the
+    LLM). If only provider is set (URL suppressed / stale / referral),
+    provider name is appended in plain text. When both are None, the
+    LLM's training_direction prose stands alone (which for the
+    "ask SCCC" case already names SCCC as guidance).
+    """
+    lines: list[str] = [
+        "**Coach Training Guide**",
+        "",
+        guide.opening_sentence,
+    ]
+    if guide.priority_gaps:
+        lines.append("")
+        for i, gap in enumerate(guide.priority_gaps, start=1):
+            lines.append(f"**{i}. {gap.skill}**")
+            lines.append(f"- Why it matters: {gap.why_it_matters}")
+            lines.append(f"- How to build it: {gap.how_to_build}")
+            td = gap.training_direction
+            if gap.training_provider and gap.training_url:
+                td = (
+                    f"{td} "
+                    f"[{gap.training_provider}]({gap.training_url})"
+                )
+            elif gap.training_provider:
+                td = f"{td} ({gap.training_provider})"
+            lines.append(f"- Training direction: {td}")
+            lines.append("")
+    lines.append(guide.closing_question)
+    return "\n".join(lines)
 
 
 def _render_drilldown_row(row: "RoleDrilldownSkillRow") -> str:

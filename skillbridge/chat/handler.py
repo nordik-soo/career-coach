@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 from config import (
     CHAT_ORCHESTRATOR,
+    DRILLDOWN_COACH_GUIDE_MODE,
     MESSAGE_UNDERSTANDING_ENABLED,
     TRAINING_REGISTRY_ENABLED,
 )
@@ -1084,6 +1085,15 @@ def _dispatch_role_drilldown(
             user_work_history=facts.get("work_history") or [],
             user_education=facts.get("education") or [],
             user_certifications=facts.get("certifications") or [],
+            # Slice 9 (2026-06-30): opt-in Coach Training Guide.
+            # Reads config.DRILLDOWN_COACH_GUIDE_MODE ("off" | "on"),
+            # default off during rollout. When on: zero-gap drilldowns
+            # get a deterministic encouragement template; drilldowns
+            # with >=1 gap get one Anthropic tool_use call for coach
+            # prose (~$0.01, +2-4s latency).
+            coach_guide_enabled=(
+                DRILLDOWN_COACH_GUIDE_MODE == "on"
+            ),
         )
     except Exception:  # noqa: BLE001
         log.exception(
