@@ -18,6 +18,7 @@ No DB, no LLM, no chat. Pure file + Python.
 """
 from __future__ import annotations
 
+import csv
 import os
 from datetime import date, timedelta
 from pathlib import Path
@@ -98,20 +99,68 @@ def test_shipped_yaml_safety_net_only_authorized_urls_surface():
         ("Microsoft Office", "https://learn.microsoft.com/en-us/training/browse/?products=office"),
         ("Ontario nursing registration", "https://www.cno.org/"),
         ("Ontario security guard licence", "https://www.ontario.ca/page/get-security-guard-or-private-investigator-licence"),
-        ("Personal Support Worker certification", "https://www.ontariocolleges.ca/en/programs?q=personal%20support%20worker"),
+        # Slice 8 polish: ontariocolleges.ca search-page URL ignored the
+        # ?q= filter (landed on generic Explore page); replaced with the
+        # actual Sault College PSW program page + online-delivery variant.
+        ("Personal Support Worker certification", "https://www.saultcollege.ca/programs/health-programs/personal-support-worker"),
+        ("Personal Support Worker certification", "https://www.saultcollege.ca/programs/health-programs/personal-support-worker-online-program-delivery"),
         ("QuickBooks and basic accounting", "https://www.saultcollege.ca/programs/business/business"),
         ("Registered Early Childhood Educator registration", "https://www.college-ece.ca/"),
         ("Registered Early Childhood Educator registration", "https://www.saultcollege.ca/programs/community-services/early-childhood-education"),
         ("Smart Serve certification", "https://smartserve.ca/"),
         ("WHMIS", "https://www.ccohs.ca/products/courses/whmis_globally/"),
         ("Working at Heights training", "https://www.ontario.ca/page/training-working-heights"),
+        ("Coordinating", "https://www.coursera.org/search?query=project%20management"),
+        ("Critical Thinking", "https://www.coursera.org/search?query=critical%20thinking"),
+        ("Decision Making", "https://www.coursera.org/search?query=decision%20making"),
+        ("Digital Systems Production", "https://learn.microsoft.com/en-us/training/browse/"),
+        # Slice 8 polish (2026-06-30): trades-OaSIS entries moved off
+        # CCOHS (safety-only agency, wrong category) to Sault College
+        # apprenticeship landing (verified). See docs/training-registry-fixes.md
+        # if/when one exists, or commit message for this batch.
+        ("Equipment and Tool Selection", "https://www.saultcollege.ca/programs/categories/apprenticeship"),
+        ("Evaluation", "https://www.coursera.org/search?query=evaluation"),
+        ("Instructing", "https://www.coursera.org/search?query=training%20and%20development"),
+        ("Learning and Teaching Strategies", "https://www.coursera.org/search?query=instructional%20design"),
+        ("Management of Financial Resources", "https://www.saultcollege.ca/programs/business/business"),
+        ("Management of Material Resources", "https://www.coursera.org/search?query=supply%20chain%20management"),
+        ("Management of Personnel Resources", "https://www.coursera.org/search?query=people%20management"),
+        ("Monitoring", "https://www.coursera.org/search?query=project%20monitoring"),
+        # Slice 8 polish: Wharton URL was 404; replaced with verified UMich
+        # course (George Siedel, 1.6M+ enrollments).
+        ("Negotiating", "https://www.coursera.org/learn/negotiation-skills"),
+        ("Numeracy", "https://www.coursera.org/specializations/excel"),
+        ("Operation Monitoring of Machinery and Equipment", "https://www.saultcollege.ca/programs/categories/apprenticeship"),
+        ("Operation and Control", "https://www.saultcollege.ca/programs/categories/apprenticeship"),
+        # Slice 8 polish: customer-service Coursera course was Arabic-only;
+        # replaced with English "Customer Service Fundamentals" by Knowledge
+        # Accelerators (verified). Also applies to the 3 Oral Communication
+        # entries that linked to the same broken URL.
+        ("Oral Communication: Active Listening", "https://www.coursera.org/learn/customer-service-fundamentals"),
+        ("Oral Communication: Oral Comprehension", "https://www.coursera.org/learn/customer-service-fundamentals"),
+        ("Oral Communication: Oral Expression", "https://www.coursera.org/learn/customer-service-fundamentals"),
+        ("Persuading", "https://www.coursera.org/search?query=persuasion"),
+        ("Preventative Maintenance", "https://www.saultcollege.ca/programs/categories/apprenticeship"),
+        ("Problem Solving", "https://www.coursera.org/search?query=problem%20solving"),
+        ("Product Design", "https://www.coursera.org/search?query=product%20design"),
+        ("Quality Control Testing", "https://www.saultcollege.ca/programs/categories/apprenticeship"),
+        ("Reading Comprehension", "https://www.coursera.org/learn/business-writing"),
+        ("Repairing", "https://www.saultcollege.ca/programs/categories/apprenticeship"),
+        ("Setting Up", "https://www.saultcollege.ca/programs/categories/apprenticeship"),
+        ("Social Perceptiveness", "https://www.coursera.org/search?query=emotional%20intelligence"),
+        ("Systems Analysis", "https://www.coursera.org/search?query=systems%20analysis"),
+        ("Time Management", "https://www.coursera.org/search?query=time%20management"),
+        ("Troubleshooting", "https://www.saultcollege.ca/programs/categories/apprenticeship"),
         ("commercial driver's license", "https://www.ontario.ca/page/get-truck-drivers-licence"),
-        ("customer service", "https://www.coursera.org/learn/customer-service"),
+        ("customer service", "https://www.coursera.org/learn/customer-service-fundamentals"),
         ("digital literacy", "https://learn.microsoft.com/en-us/training/browse/?products=office"),
         ("first aid and CPR", "https://sja.ca/"),
         ("food handler certification", "https://www.algomapublichealth.com/"),
         ("food handler certification", "https://www.traincan.com/"),
-        ("forklift certification", "https://www.ccohs.ca/products/courses/forklifts/"),
+        # Slice 8 polish: CCOHS forklift URL (subdir didn't exist; codex
+        # hallucination); replaced with IHSA verified Lift Truck Operator
+        # course (Ontario standard).
+        ("forklift certification", "https://www.ihsa.ca/Training/Courses/Lift-Truck-Operator-1-Day-(2024).aspx"),
         ("medical terminology", "https://www.coursera.org/learn/clinical-terminology"),
         ("payroll compliance training", "https://payroll.ca/"),
         ("records management", "https://www.saultcollege.ca/programs/business/business"),
@@ -167,6 +216,47 @@ def test_shipped_yaml_referral_only_entries_remain_visible():
         "Seed YAML has no referral_only resources. The architecture "
         "depends on referral_only as the safe fallback when verified "
         "URLs aren't available."
+    )
+
+
+def test_every_oasis_skill_name_resolves_to_training_registry_gap():
+    """Every OaSIS skill descriptor used by role drilldown should have
+    a deterministic training-registry entry.
+
+    The drilldown builder looks up training with
+    `registry.surface_resources(oasis_skill_name)`. If an OaSIS name is
+    missing here, the table falls back to plain "ask SCCC" instead of
+    showing a useful training direction.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    oasis_path = repo_root / "data" / "oasis_skills.csv"
+    registry = TrainingRegistry.from_yaml()
+    today = date.today()
+
+    missing: list[str] = []
+    no_resources: list[str] = []
+    no_surface: list[str] = []
+
+    with oasis_path.open("r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            skill_name = (row.get("skill_name") or "").strip()
+            if not skill_name:
+                continue
+            gap = registry.lookup(skill_name)
+            if gap is None:
+                missing.append(skill_name)
+                continue
+            if not gap.resources:
+                no_resources.append(skill_name)
+                continue
+            resources = registry.surface_resources(skill_name, today=today)
+            if not resources:
+                no_surface.append(skill_name)
+
+    assert not missing, f"OaSIS skills missing registry gap: {missing}"
+    assert not no_resources, f"OaSIS skills with no resources: {no_resources}"
+    assert not no_surface, (
+        f"OaSIS skills with no surfaced URL resource: {no_surface}"
     )
 
 

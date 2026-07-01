@@ -79,6 +79,16 @@ ALLOWED_PROVIDERS: frozenset[str] = frozenset({
     "CCOHS",
     "TrainCan",
     "Algoma Public Health",
+    # Slice 8 polish (2026-06-30): added when fixing OaSIS-seed verification.
+    # IHSA is one of Ontario's designated occupational health and safety
+    # associations (construction/electrical/transportation), source of the
+    # Lift Truck Operator training that replaced a broken CCOHS URL.
+    "IHSA",
+    # "Sault College (online delivery)" is the same institution as
+    # "Sault College" but disambiguated because the online PSW program
+    # is delivered separately (different program code) -- the resource
+    # objects are surfaced as alternatives, so we keep both names visible.
+    "Sault College (online delivery)",
 })
 
 

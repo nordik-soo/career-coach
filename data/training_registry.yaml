@@ -375,14 +375,17 @@ gaps:
           certification courses with practical evaluation.
         verified_at: null
         verified_by: null
-      - provider: "CCOHS"
-        type: "online_course"
-        url: "https://www.ccohs.ca/products/courses/forklifts/"
+      - provider: "IHSA"
+        type: "local_training"
+        url: "https://www.ihsa.ca/Training/Courses/Lift-Truck-Operator-1-Day-(2024).aspx"
         summary: >-
-          Canadian Centre for Occupational Health and Safety forklift safety
-          course covering core hazards and safe operating practices.
+          Infrastructure Health and Safety Association (IHSA) Lift Truck Operator
+          one-day theory-based safety training program for Ontario workplaces.
+          Certificate of completion issued at 75% pass on final knowledge test.
+          IHSA is one of Ontario's designated occupational health and safety
+          associations for the construction, electrical, and transportation sectors.
         verified_at: "2026-06-30"
-        verified_by: "codex"
+        verified_by: "lead-engineer"
 
   # ==================================================================
   # 7. Food Handler / Food Safe
@@ -439,20 +442,21 @@ gaps:
     resources:
       - provider: "Sault College"
         type: "local_training"
-        url: "https://www.saultcollege.ca/"                    # TODO: link to PSW program page
+        url: "https://www.saultcollege.ca/programs/health-programs/personal-support-worker"
         summary: >-
-          Sault College's full PSW program with classroom + clinical
-          placement; one of the standard local pathways into long-term care.
-        verified_at: null
-        verified_by: null
-      - provider: "OntarioColleges.ca"
-        type: "local_training"
-        url: "https://www.ontariocolleges.ca/en/programs?q=personal%20support%20worker"
-        summary: >-
-          Ontario public-college program search for Personal Support Worker
-          pathways, useful when confirming currently available PSW programs.
+          Sault College's 1-year Personal Support Worker Ontario College
+          Certificate (Program 3027). Includes classroom + 21 credits of
+          practicum across long-term care, hospital, and home-care settings.
         verified_at: "2026-06-30"
-        verified_by: "codex"
+        verified_by: "lead-engineer"
+      - provider: "Sault College (online delivery)"
+        type: "online_course"
+        url: "https://www.saultcollege.ca/programs/health-programs/personal-support-worker-online-program-delivery"
+        summary: >-
+          Sault College's online-delivery option for the PSW program; useful
+          for learners who can't attend in-person classroom training.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
       - provider: "Sault Community Career Centre"
         type: "referral_only"
         url: null
@@ -607,12 +611,14 @@ gaps:
         verified_by: "lead-engineer"
       - provider: "Coursera"
         type: "online_course"
-        url: "https://www.coursera.org/learn/customer-service"
+        url: "https://www.coursera.org/learn/customer-service-fundamentals"
         summary: >-
-          CVS Health's free "Customer Service" course on Coursera; broad
-          fundamentals applicable across industries.
+          "Customer Service Fundamentals" by Knowledge Accelerators on Coursera
+          (English, beginner-level). Covers communication, problem-solving, and
+          empathy skills for Customer Service Specialist, Help Desk Agent, and
+          Support Associate roles. 60,000+ enrollments, 4.8 stars.
         verified_at: "2026-06-30"
-        verified_by: "codex"
+        verified_by: "lead-engineer"
 
   # ==================================================================
   # 13. CompTIA / IT Support
@@ -1158,5 +1164,1152 @@ gaps:
         summary: >-
           Local office-administration and business programs may cover records,
           filing, document management, and office procedures.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 26. OaSIS Competency: Oral Communication: Active Listening
+  # ==================================================================
+  - canonical_name: "Oral Communication: Active Listening"
+    aliases:
+      - "active listening"
+      - "listening"
+      - "listening skills"
+      - "oral communication active listening"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for giving full attention, understanding what others
+      are saying, asking appropriate questions, and not interrupting.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local communication workshops and coach
+          them on how to demonstrate listening skills from prior roles.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/learn/customer-service-fundamentals"
+        summary: >-
+          "Customer Service Fundamentals" by Knowledge Accelerators on Coursera.
+          Covers listening, question-asking, and professional communication
+          skills directly applicable to active-listening competency.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 27. OaSIS Competency: Numeracy
+  # ==================================================================
+  - canonical_name: "Numeracy"
+    aliases:
+      - "numeracy"
+      - "number skills"
+      - "math skills"
+      - "workplace math"
+      - "calculations"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for understanding, using, and reporting numerical and
+      mathematical information in workplace contexts.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users find local numeracy, upgrading, or workplace math
+          supports relevant to their target job.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/specializations/excel"
+        summary: >-
+          Excel specialization that can strengthen practical workplace
+          numeracy, formulas, tables, analysis, and reporting.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 28. OaSIS Competency: Oral Communication: Oral Comprehension
+  # ==================================================================
+  - canonical_name: "Oral Communication: Oral Comprehension"
+    aliases:
+      - "oral comprehension"
+      - "listening comprehension"
+      - "understanding spoken information"
+      - "oral communication comprehension"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for listening to and understanding information and
+      ideas presented through spoken words and sentences.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local communication supports and practise
+          explaining how they understand instructions, clients, and team needs.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/learn/customer-service-fundamentals"
+        summary: >-
+          "Customer Service Fundamentals" by Knowledge Accelerators on Coursera.
+          Covers practical listening and comprehension behaviours used with
+          clients, coworkers, and supervisors.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 29. OaSIS Competency: Oral Communication: Oral Expression
+  # ==================================================================
+  - canonical_name: "Oral Communication: Oral Expression"
+    aliases:
+      - "oral expression"
+      - "speaking"
+      - "verbal communication"
+      - "explaining information"
+      - "oral communication expression"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for talking to others to convey information effectively
+      in a workplace setting.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users practise interview, customer-service, and
+          workplace explanation examples for their target role.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/learn/customer-service-fundamentals"
+        summary: >-
+          "Customer Service Fundamentals" by Knowledge Accelerators on Coursera.
+          Supports clear, professional verbal communication in service and
+          office roles.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 30. OaSIS Competency: Reading Comprehension
+  # ==================================================================
+  - canonical_name: "Reading Comprehension"
+    aliases:
+      - "reading comprehension"
+      - "reading"
+      - "understanding documents"
+      - "document comprehension"
+      - "workplace reading"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for understanding written information in work-related
+      documents, forms, records, procedures, and instructions.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users find reading, upgrading, and workplace-document
+          support matched to their target occupation.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/learn/business-writing"
+        summary: >-
+          Business writing course that also supports clearer reading and
+          interpretation of workplace documents and professional messages.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 31. OaSIS Competency: Decision Making
+  # ==================================================================
+  - canonical_name: "Decision Making"
+    aliases:
+      - "decision making"
+      - "judgment"
+      - "judgement"
+      - "workplace decisions"
+      - "choosing options"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for assessing feasible options and choosing the most
+      appropriate action based on outcomes and work objectives.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users frame examples of workplace judgment, prioritizing,
+          and decisions from their resume experience.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=decision%20making"
+        summary: >-
+          Coursera course catalogue for decision-making and judgment training
+          that can help users strengthen this transferable skill.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 32. OaSIS Competency: Evaluation
+  # ==================================================================
+  - canonical_name: "Evaluation"
+    aliases:
+      - "evaluation"
+      - "assessing"
+      - "assessment"
+      - "reviewing work"
+      - "measuring effectiveness"
+      - "quality assessment"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for applying criteria and indicators to assess the
+      effectiveness, value, impact, quality, or performance of work.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local options and resume examples for
+          evaluation, checking, reporting, and quality review.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=evaluation"
+        summary: >-
+          Coursera course catalogue for evaluation, assessment, measurement,
+          and quality-improvement topics.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 33. OaSIS Competency: Learning and Teaching Strategies
+  # ==================================================================
+  - canonical_name: "Learning and Teaching Strategies"
+    aliases:
+      - "learning and teaching strategies"
+      - "teaching strategies"
+      - "learning strategies"
+      - "training methods"
+      - "instructional methods"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for selecting and using learning or instructional
+      methods appropriate to the situation.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify training, onboarding, mentoring, or
+          workplace-learning examples that fit their target role.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=instructional%20design"
+        summary: >-
+          Coursera course catalogue for instructional design, training methods,
+          and teaching strategies.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 34. OaSIS Competency: Problem Solving
+  # ==================================================================
+  - canonical_name: "Problem Solving"
+    aliases:
+      - "problem solving"
+      - "solving problems"
+      - "troubleshooting issues"
+      - "resolving issues"
+      - "finding solutions"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for analyzing information related to problems and
+      developing feasible solutions or options.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users describe practical workplace problem-solving
+          examples from their resume or job history.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=problem%20solving"
+        summary: >-
+          Coursera course catalogue for problem-solving, analysis, and
+          workplace solution-building skills.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 35. OaSIS Competency: Systems Analysis
+  # ==================================================================
+  - canonical_name: "Systems Analysis"
+    aliases:
+      - "systems analysis"
+      - "process analysis"
+      - "workflow analysis"
+      - "analyzing systems"
+      - "business process analysis"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for determining how a system should work and how changes
+      in conditions, operations, or environment affect outcomes.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users connect workflow, process, reporting, or system
+          improvement experience to target-job expectations.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=systems%20analysis"
+        summary: >-
+          Coursera course catalogue for systems analysis, process analysis, and
+          business-analysis topics.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 36. OaSIS Competency: Critical Thinking
+  # ==================================================================
+  - canonical_name: "Critical Thinking"
+    aliases:
+      - "critical thinking"
+      - "analytical thinking"
+      - "reasoning"
+      - "logic"
+      - "evidence based judgment"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for using logic and reasoning to question, interpret,
+      analyze, and form evidence-based conclusions or judgments.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify examples from their work history that
+          demonstrate analysis, judgment, and evidence-based thinking.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=critical%20thinking"
+        summary: >-
+          Coursera course catalogue for critical thinking, analysis, reasoning,
+          and workplace judgment training.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 37. OaSIS Competency: Digital Systems Production
+  # ==================================================================
+  - canonical_name: "Digital Systems Production"
+    aliases:
+      - "digital systems production"
+      - "software development"
+      - "application development"
+      - "digital technology development"
+      - "systems development"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for designing, developing, adapting, or integrating
+      hardware, software, applications, electronic devices, or digital
+      technologies.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local digital-skills training, IT
+          upgrading, and ways to describe technical project experience.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Microsoft Learn"
+        type: "online_course"
+        url: "https://learn.microsoft.com/en-us/training/browse/"
+        summary: >-
+          Microsoft Learn catalogue for software, cloud, data, and digital
+          technology training paths.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 38. OaSIS Competency: Equipment and Tool Selection
+  # ==================================================================
+  - canonical_name: "Equipment and Tool Selection"
+    aliases:
+      - "equipment and tool selection"
+      - "tool selection"
+      - "equipment selection"
+      - "choosing tools"
+      - "selecting equipment"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for choosing between tools, equipment, or machinery to
+      perform a job.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local trade, safety, or equipment
+          training that fits their target role.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/categories/apprenticeship"
+        summary: >-
+          Sault College apprenticeship programs across 15 designated trades
+          (Automotive Service Technician, Heavy Duty Equipment Technician,
+          General Machinist, Industrial Electrician, Plumber, etc.). Most
+          trades involve significant tool and equipment selection as part of
+          their training standards.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 39. OaSIS Competency: Operation and Control
+  # ==================================================================
+  - canonical_name: "Operation and Control"
+    aliases:
+      - "operation and control"
+      - "operating equipment"
+      - "machine operation"
+      - "controlling equipment"
+      - "equipment operation"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for maneuvering and controlling operations of
+      equipment, machines, vehicles, or systems.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local equipment, driving, safety, or
+          trade training relevant to their target occupation.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/categories/apprenticeship"
+        summary: >-
+          Sault College apprenticeship programs across 15 designated trades.
+          Equipment-operating trades (Automotive Service Technician, Heavy
+          Duty Equipment Technician, Truck and Coach Technician, Plumber)
+          all include controlling and maneuvering equipment as part of the
+          provincial training standard.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 40. OaSIS Competency: Operation Monitoring of Machinery and Equipment
+  # ==================================================================
+  - canonical_name: "Operation Monitoring of Machinery and Equipment"
+    aliases:
+      - "operation monitoring"
+      - "machinery monitoring"
+      - "equipment monitoring"
+      - "monitoring machinery"
+      - "monitoring equipment"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for watching gauges, displays, dials, or indicators to
+      ensure equipment or machinery is working to specification.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local equipment-safety or technical
+          training matched to the role they are exploring.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/categories/apprenticeship"
+        summary: >-
+          Sault College apprenticeship programs across 15 designated trades.
+          Trades that involve gauge/instrument monitoring (Heavy Duty
+          Equipment Technician, Industrial Electrician, Steamfitting,
+          Industrial Mechanic Millwright) all train monitoring as a core
+          skill.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 41. OaSIS Competency: Preventative Maintenance
+  # ==================================================================
+  - canonical_name: "Preventative Maintenance"
+    aliases:
+      - "preventative maintenance"
+      - "preventive maintenance"
+      - "maintenance"
+      - "equipment maintenance"
+      - "building maintenance"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for maintaining equipment, devices, buildings, or
+      machinery to keep them functional and prevent damage or failures.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify maintenance, safety, trade, or equipment
+          courses that match their target occupation.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/categories/apprenticeship"
+        summary: >-
+          Sault College apprenticeship programs across 15 designated trades.
+          Maintenance-focused apprenticeships (Industrial Mechanic Millwright,
+          Industrial Electrician, Heavy Duty Equipment Technician, Plumber)
+          all include preventative maintenance procedures in their
+          provincial training standard.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 42. OaSIS Competency: Product Design
+  # ==================================================================
+  - canonical_name: "Product Design"
+    aliases:
+      - "product design"
+      - "design"
+      - "layout design"
+      - "technical design"
+      - "design development"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for designing and developing layouts for objects,
+      equipment, machinery, structures, or engineering systems.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify design, drafting, or technical training
+          matched to their target occupation.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=product%20design"
+        summary: >-
+          Coursera course catalogue for product design, design thinking, and
+          related technical design training.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 43. OaSIS Competency: Quality Control Testing
+  # ==================================================================
+  - canonical_name: "Quality Control Testing"
+    aliases:
+      - "quality control testing"
+      - "quality control"
+      - "quality testing"
+      - "inspection"
+      - "testing"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for conducting tests or inspections of prototypes,
+      products, services, or processes to ensure quality.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify quality, inspection, and safety training
+          relevant to their target role.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/categories/apprenticeship"
+        summary: >-
+          Sault College apprenticeship programs across 15 designated trades.
+          Many trades (General Machinist, Automotive Service Technician,
+          Construction and Maintenance Electrician) include inspection and
+          quality-check procedures as part of the provincial training
+          standard.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 44. OaSIS Competency: Repairing
+  # ==================================================================
+  - canonical_name: "Repairing"
+    aliases:
+      - "repairing"
+      - "repair"
+      - "repairs"
+      - "fixing equipment"
+      - "equipment repair"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for replacing, restoring, or adjusting defective
+      components in equipment, machines, or technical systems.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local trade, repair, maintenance, or
+          equipment-safety training for their target role.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/categories/apprenticeship"
+        summary: >-
+          Sault College apprenticeship programs across 15 designated trades.
+          Repair-oriented apprenticeships (Automotive Service Technician,
+          Truck and Coach Technician, Heavy Duty Equipment Technician,
+          Industrial Mechanic Millwright) all train repair as a core
+          competency.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 45. OaSIS Competency: Setting Up
+  # ==================================================================
+  - canonical_name: "Setting Up"
+    aliases:
+      - "setting up"
+      - "setup"
+      - "equipment setup"
+      - "machine setup"
+      - "installing equipment"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for setting up, adjusting, installing, assembling, or
+      preparing equipment, machines, or parts for use.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify setup, installation, trade, and safety
+          training relevant to the role they are exploring.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/categories/apprenticeship"
+        summary: >-
+          Sault College apprenticeship programs across 15 designated trades.
+          Installation and setup work is core to several apprenticeships
+          (Plumber, Steamfitting, Industrial Electrician, Industrial Mechanic
+          Millwright), all of which teach equipment installation and assembly
+          in their provincial training standard.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 46. OaSIS Competency: Troubleshooting
+  # ==================================================================
+  - canonical_name: "Troubleshooting"
+    aliases:
+      - "troubleshooting"
+      - "diagnosing issues"
+      - "fixing problems"
+      - "resolving technical problems"
+      - "finding causes"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for determining causes of operating errors in equipment,
+      machinery, or technological systems and deciding how to resolve them.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify technical, equipment, IT, or workplace
+          problem-solving training relevant to their target role.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/categories/apprenticeship"
+        summary: >-
+          Sault College apprenticeship programs across 15 designated trades.
+          Diagnostic troubleshooting is core to most trades (Automotive
+          Service Technician, Heavy Duty Equipment Technician, Industrial
+          Electrician, Industrial Mechanic Millwright) and is taught
+          throughout the provincial apprenticeship standard.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 47. OaSIS Competency: Management of Financial Resources
+  # ==================================================================
+  - canonical_name: "Management of Financial Resources"
+    aliases:
+      - "management of financial resources"
+      - "financial management"
+      - "budget management"
+      - "cost control"
+      - "managing budgets"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for planning, organizing, directing, controlling, or
+      monitoring financial resources and activities.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users connect budgeting, reporting, bookkeeping, or
+          financial oversight examples to target-role expectations.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Sault College"
+        type: "local_training"
+        url: "https://www.saultcollege.ca/programs/business/business"
+        summary: >-
+          Local business program that may cover accounting, budgeting,
+          reporting, and business financial-management foundations.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 48. OaSIS Competency: Management of Material Resources
+  # ==================================================================
+  - canonical_name: "Management of Material Resources"
+    aliases:
+      - "management of material resources"
+      - "material resources"
+      - "inventory management"
+      - "supply management"
+      - "materials management"
+      - "purchasing"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for planning and managing the purchase, inventory,
+      warehousing, transportation, distribution, or use of products or
+      materials.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify local supply, inventory, logistics, or
+          operations training that fits their target role.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=supply%20chain%20management"
+        summary: >-
+          Coursera course catalogue for supply chain, logistics, inventory, and
+          materials-management training.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 49. OaSIS Competency: Management of Personnel Resources
+  # ==================================================================
+  - canonical_name: "Management of Personnel Resources"
+    aliases:
+      - "management of personnel resources"
+      - "people management"
+      - "staff management"
+      - "team leadership"
+      - "supervision"
+      - "managing employees"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for recruiting, training, motivating, developing, and
+      directing employees and assigning work effectively.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify leadership, supervision, and workplace
+          people-management supports relevant to their career path.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=people%20management"
+        summary: >-
+          Coursera course catalogue for people management, supervision,
+          leadership, and employee development.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 50. OaSIS Competency: Monitoring
+  # ==================================================================
+  - canonical_name: "Monitoring"
+    aliases:
+      - "monitoring"
+      - "tracking"
+      - "tracking progress"
+      - "monitoring work"
+      - "monitoring performance"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for observing and collecting information to track status,
+      identify issues, spot deviations, and support timely corrective action.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify examples of tracking, reporting, follow
+          up, and monitoring from prior work experience.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=project%20monitoring"
+        summary: >-
+          Coursera course catalogue for project monitoring, tracking,
+          reporting, and performance-measurement skills.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 51. OaSIS Competency: Time Management
+  # ==================================================================
+  - canonical_name: "Time Management"
+    aliases:
+      - "time management"
+      - "prioritizing"
+      - "scheduling"
+      - "managing time"
+      - "deadline management"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for managing one's own time and the time of others in a
+      workplace setting.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users frame scheduling, prioritizing, and deadline
+          examples from work history and identify local supports if needed.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=time%20management"
+        summary: >-
+          Coursera course catalogue for time management, productivity,
+          scheduling, and prioritization skills.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 52. OaSIS Competency: Coordinating
+  # ==================================================================
+  - canonical_name: "Coordinating"
+    aliases:
+      - "coordinating"
+      - "coordination"
+      - "organizing work"
+      - "workflow coordination"
+      - "coordinating people"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for organizing people or groups by adjusting activities
+      in relation to others so they work effectively as a whole.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users connect coordination, scheduling, follow-up, and
+          workflow experience to target-role expectations.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=project%20management"
+        summary: >-
+          Coursera course catalogue for project management, coordination,
+          scheduling, and organizing work.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 53. OaSIS Competency: Instructing
+  # ==================================================================
+  - canonical_name: "Instructing"
+    aliases:
+      - "instructing"
+      - "training others"
+      - "teaching"
+      - "onboarding"
+      - "explaining procedures"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for teaching others knowledge or how to do something.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify training, onboarding, mentoring, or
+          procedure-explanation examples from prior work.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=training%20and%20development"
+        summary: >-
+          Coursera course catalogue for training, teaching, instructional
+          methods, and workplace learning.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 54. OaSIS Competency: Negotiating
+  # ==================================================================
+  - canonical_name: "Negotiating"
+    aliases:
+      - "negotiating"
+      - "negotiation"
+      - "vendor negotiation"
+      - "resolving differences"
+      - "bargaining"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for participating in or facilitating communication
+      between parties to resolve differences and reach a viable agreement.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify examples of negotiation, conflict
+          resolution, vendor communication, or agreement-building from work.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/learn/negotiation-skills"
+        summary: >-
+          University of Michigan's "Successful Negotiation: Essential Strategies
+          and Skills" (George Siedel) on Coursera. Covers preparation, tactics,
+          contract creation, and dispute resolution; 1.6M+ enrollments, 4.8 stars.
+        verified_at: "2026-06-30"
+        verified_by: "lead-engineer"
+
+  # ==================================================================
+  # 55. OaSIS Competency: Persuading
+  # ==================================================================
+  - canonical_name: "Persuading"
+    aliases:
+      - "persuading"
+      - "persuasion"
+      - "influencing"
+      - "influence"
+      - "convincing others"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for convincing others to change minds, beliefs,
+      intentions, or behaviours.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users practise how to describe persuasion, influence,
+          customer-service, or stakeholder examples from their work history.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=persuasion"
+        summary: >-
+          Coursera course catalogue for persuasion, influence, communication,
+          and stakeholder-engagement skills.
+        verified_at: "2026-06-30"
+        verified_by: "codex"
+
+  # ==================================================================
+  # 56. OaSIS Competency: Social Perceptiveness
+  # ==================================================================
+  - canonical_name: "Social Perceptiveness"
+    aliases:
+      - "social perceptiveness"
+      - "reading people"
+      - "emotional awareness"
+      - "understanding reactions"
+      - "body language"
+    category: "skill"
+    jurisdiction: "Ontario"
+    requirement_level: "commonly_requested"
+    requirement_kind: "oasis_competency_training"
+    evidence_authority: "OaSIS NOC skill profile"
+    description: >-
+      OaSIS competency for being aware of others' reactions, unspoken
+      communication, body-language cues, and feelings, and understanding why
+      they behave as they do.
+    resources:
+      - provider: "Sault Community Career Centre"
+        type: "referral_only"
+        url: null
+        summary: >-
+          SCCC can help users identify customer-service, teamwork, care,
+          counselling, or supervision examples that show social awareness.
+        verified_at: "2026-06-04"
+        verified_by: "lead-engineer"
+      - provider: "Coursera"
+        type: "online_course"
+        url: "https://www.coursera.org/search?query=emotional%20intelligence"
+        summary: >-
+          Coursera course catalogue for emotional intelligence, social
+          awareness, communication, and people skills.
         verified_at: "2026-06-30"
         verified_by: "codex"

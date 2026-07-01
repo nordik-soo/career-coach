@@ -87,9 +87,16 @@ bit longer."
 |---|---|---|
 | **Canadian Red Cross** | First Aid, CPR, mental health certifications | `online_course`, `local_training` |
 | **St. John Ambulance** | First Aid, CPR | `online_course`, `local_training` |
-| **CCOHS** | Canadian Centre for Occupational Health and Safety. WHMIS, workplace safety | `online_course` |
+| **CCOHS** | Canadian Centre for Occupational Health and Safety. WHMIS, workplace safety. **NOTE:** scope is safety-only — do NOT link to CCOHS for trades skill training (Repairing, Setting Up, Troubleshooting, etc.) | `online_course` |
+| **IHSA** | Infrastructure Health and Safety Association — one of Ontario's designated occupational H&S associations (construction/electrical/transportation). Authoritative for lift-truck operator training and other equipment-operator safety credentials. Added 2026-06-30. | `local_training` |
 | **TrainCan** | Food Handler / Food Safe | `online_course` |
 | **Algoma Public Health** | Local Algoma-region public health unit. Authoritative for food-handler certification and other regulated public-health training in this catchment | `local_training` |
+
+### Provider variants
+
+| Provider | Why a distinct entry | Notes |
+|---|---|---|
+| **Sault College (online delivery)** | Distinct program code from in-person Sault College offerings (e.g. PSW online has program code 3129 vs in-person 3027). When both delivery modes exist for the same gap, surfacing both lets the user pick the format that fits their schedule. Same trust criteria as Sault College proper. Added 2026-06-30. | `online_course`, `local_training` |
 
 ## Not allowed (the NO list)
 
