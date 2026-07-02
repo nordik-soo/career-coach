@@ -78,31 +78,25 @@ Field notes:
 | Field | Required | Purpose |
 |---|---|---|
 | `posting_id` | yes | Referenced by cases. Once published in a tagged corpus version, never delete or repurpose — supersede with a new id and mark the old one `retired: true` so historical calibration reports stay comparable |
-| `transcribed_from_sccc` | yes | Boolean. `true` means the posting was copied verbatim from a real live SCCC row (title / employer / NOC / skills / requirement labels / credential flags) at the timestamp in the corpus header, then frozen. `false` means the posting was NOT copied from live SCCC — see the semantic-overload note below |
+| `is_synthetic` | yes | Boolean. `true` means the posting is an intentional test fixture — authored from scratch or reconstructed from historical fixture comments to exercise a specific engine behaviour. `false` means the posting is anchored to a real-SCCC snapshot (see `transcribed_from_sccc`). All 6 current postings are `is_synthetic: true`; a future contributor MAY add SCCC-anchored postings alongside them |
+| `transcribed_from_sccc` | yes | Boolean. `true` means the posting was copied verbatim from a real live SCCC row (title / employer / NOC / skills / requirement labels / credential flags) at a specific timestamp, then frozen. `false` means the posting was NOT copied from live SCCC — either because it is `is_synthetic: true` (all current cases) or because it is real-anchored provenance is planned but not yet captured. Reserved as a forward-looking field for real-row snapshots |
 | `posted_days_ago` | yes | The suite resolves dates against a frozen anchor date (loader constant), so recency-boost behaviour is deterministic and never ages out |
 | `skills[].requirement` | yes | The corpus asserts required/preferred labels directly. This is the JD-extractor's *output* contract, deliberately: the eval measures the engine, not the extractor. Extractor quality gets its own corpus later — do not conflate them (this is the lesson from the removed F6 fixture) |
 | `skills[].is_credential` | yes | Explicit, not inferred via `is_credential_skill_name` at load. A CI check asserts the flag agrees with `is_credential_skill_name` and fails loudly on disagreement — that disagreement is a real bug in one of the two places |
 | `embedding_profile` | no | Default `"default"`. See §Semantic determinism |
 
-**Semantic overload on `transcribed_from_sccc: false`.** The current single boolean
-conflates two distinct posting states:
-
-- **Reconstruction pending:** the posting represents a real SCCC row that has NOT yet
-  been copied verbatim into the corpus. The header (`data/matching_eval_corpus.yaml`
-  top-of-file `POSTING TRANSCRIPTION` note) explicitly names which postings are in
-  this state. These must be transcribed before the corpus gates CI.
-- **Synthetic by design:** the posting is a fully-constructed test artifact for a
-  specific classifier scenario (e.g. a part-time admin posting to exercise the
-  work-type cap). Inline comments in the YAML mark these with "Synthetic — no
-  transcription needed." These must NEVER be transcribed; doing so would remove the
-  scenario from the corpus.
-
-The `transcribed_from_sccc: false` flag currently applies to BOTH states, and which
-state a specific posting is in is communicated only via YAML comments. A future
-schema bump may introduce an `is_synthetic: bool` field to disambiguate. Deferred
-to keep this correction pass scoped to schema language only. Until then, treat the
-YAML header's `POSTING TRANSCRIPTION` list as the authoritative source for which
-postings still owe SCCC transcription work.
+**RESOLVED (2026-07-02): `is_synthetic` disambiguates the two states.** The initial
+import (commit `6f3343c`) shipped a single boolean (`transcribed_from_sccc`) that
+conflated two distinct posting states: postings pending SCCC transcription vs.
+synthetic-by-design test fixtures. On DB check, R2's originally-named-for-transcription
+postings had rotated out of `core.v_current_job` between fixture authoring and corpus
+import. Rather than substitute currently-live postings (which would mutate test intent
+and re-introduce drift on the next SCCC rotation), all 6 postings were reclassified
+as intentional synthetic constructs. The `is_synthetic: bool` field (added to the
+Posting bank field table above) now explicitly claims that state, and
+`transcribed_from_sccc` was retained on all postings as a forward-looking field for
+any future real-SCCC-anchored additions. See the `POSTING BANK PROVENANCE` note in
+the YAML header for the full rationale.
 
 ## Case entries
 
@@ -350,8 +344,9 @@ states *why* the expectation holds, F1/F2 style, not just what it is.
 ## Migration from test_matching_fixtures.py
 
 The five current fixtures map directly: F1 → `c_truck_coach_no_class_g`, F2 → its
-`cap_reasons_forbidden` sibling, and the `depends_on_data` fixtures get their pinned postings
-transcribed into the bank from the current SCCC rows (one-time copy — after that, the
-bank is authoritative and immutable). Keep `test_matching_fixtures.py` running until the
-new suite hits the coverage floor, then delete it in the same PR that flips CI to the corpus. No
-period where both are optional.
+`cap_reasons_forbidden` sibling, and the remaining fixtures' scenarios are captured
+by synthetic postings authored from the fixture comments (see the `POSTING BANK
+PROVENANCE` note at the top of the YAML for why live-SCCC transcription was ruled
+out). Keep `test_matching_fixtures.py` running until the new suite hits the coverage
+floor, then delete it in the same PR that flips CI to the corpus. No period where both
+are optional.

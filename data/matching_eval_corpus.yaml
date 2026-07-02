@@ -7,23 +7,44 @@
 # ====================================================================
 # REVIEW STATUS: PENDING HUMAN VERIFICATION
 # ====================================================================
-# Two things REQUIRE lead-engineer action before this corpus gates CI:
+# One thing REQUIRES lead-engineer action before this corpus gates CI:
 #
-#   1. POSTING TRANSCRIPTION. pb_truck_coach_grfn, pb_ops_manager_cygnus,
-#      and pb_front_desk_quality_inn are reconstructed from fixture
-#      comments in test_matching_fixtures.py, NOT transcribed from the
-#      live SCCC rows. Do the one-time copy from core.v_current_job +
-#      extracted skills (exact names, requirement labels, credential
-#      flags), then mark each posting `transcribed_from_sccc: true`.
-#      After transcription the bank is authoritative and immutable.
+#   EXPECTATION REVIEW. Cases tagged `expectation_status: authored`
+#   encode intended behaviour, not verified engine output. First
+#   suite run will show disagreements; each one is EITHER an engine
+#   bug OR a wrong expectation — resolve per the human-review rule
+#   in the schema doc, never by blind-updating to whatever the
+#   engine emitted. Cases tagged `transcribed` carry expectations
+#   copied from fixtures that pass today.
+# ====================================================================
 #
-#   2. EXPECTATION REVIEW. Cases tagged `expectation_status: authored`
-#      encode intended behaviour, not verified engine output. First
-#      suite run will show disagreements; each one is EITHER an engine
-#      bug OR a wrong expectation — resolve per the human-review rule
-#      in the schema doc, never by blind-updating to whatever the
-#      engine emitted. Cases tagged `transcribed` carry expectations
-#      copied from fixtures that pass today.
+# ====================================================================
+# POSTING BANK PROVENANCE (locked 2026-07-02)
+# ====================================================================
+# All 6 postings in this bank are SYNTHETIC test fixtures marked
+# `is_synthetic: true`. None is transcribed from a live SCCC row.
+#
+# Background: the initial import of this artifact (commit 6f3343c)
+# claimed 3 postings (pb_truck_coach_grfn, pb_ops_manager_cygnus,
+# pb_front_desk_quality_inn) could be transcribed from
+# core.v_current_job as future work. On check, those specific SCCC
+# rows had rotated out of the dataset between fixture authoring and
+# corpus import. Rather than substitute currently-live postings
+# (which would mutate test intent and re-introduce drift on the
+# next SCCC rotation), the honest correction is to reclassify all
+# 6 postings as intentional synthetic constructs.
+#
+# The corpus's goal is frozen determinism, not live-data mirroring.
+# Gold corpus examples should be stable enough to test the engine,
+# not realistic enough to expire.
+#
+# `transcribed_from_sccc: false` remains on all 6 postings as a
+# forward-looking field. A future contributor MAY add real-SCCC-
+# anchored postings alongside the synthetic ones by flagging them
+# `transcribed_from_sccc: true` with a snapshot date; the field
+# provides provenance for any such additions. `is_synthetic: true`
+# is the positive claim explaining WHY the transcription flag is
+# false today.
 # ====================================================================
 #
 # Seed coverage vs. the CI floor (36): this seed has 17 cases. Gaps to
@@ -67,12 +88,14 @@ embedding_fixtures:
 posting_bank:
 
   # ------------------------------------------------------------------
-  # Garden River truck & coach posting. Skill list reconstructed from
-  # F1/F9/F11 fixture comments ("top-12 skills", Class G at
+  # Garden River truck & coach synthetic fixture. Skill list authored
+  # from F1/F9/F11 fixture comments ("top-12 skills", Class G at
   # importance_rank 9 — below the old top-5 cutoff, which is what the
-  # slice 4b carve-out cases exercise). TRANSCRIBE FROM SCCC.
+  # slice 4b carve-out cases exercise). Synthetic by design — see the
+  # POSTING BANK PROVENANCE header note above.
   # ------------------------------------------------------------------
   - posting_id: "pb_truck_coach_grfn"
+    is_synthetic: true
     transcribed_from_sccc: false
     title: "Truck and Coach Technician"
     employer: "Garden River First Nation"
@@ -96,9 +119,10 @@ posting_bank:
     embedding_profile: "default"
 
   # ------------------------------------------------------------------
-  # Quality Inn front desk (F5/F7, cv_04 archetype). TRANSCRIBE.
+  # Quality Inn front desk synthetic fixture (F5/F7, cv_04 archetype).
   # ------------------------------------------------------------------
   - posting_id: "pb_front_desk_quality_inn"
+    is_synthetic: true
     transcribed_from_sccc: false
     title: "Front Desk Agent"
     employer: "Quality Inn Bay Front"
@@ -118,10 +142,12 @@ posting_bank:
     embedding_profile: "default"
 
   # ------------------------------------------------------------------
-  # Cygnus ops manager (F4 title-match fast path, cv_01 archetype).
-  # TRANSCRIBE — skill list here is a plausible stand-in.
+  # Cygnus ops manager synthetic fixture (F4 title-match fast path,
+  # cv_01 archetype). Skill list is a plausible stand-in authored to
+  # exercise the F4 title-override behaviour.
   # ------------------------------------------------------------------
   - posting_id: "pb_ops_manager_cygnus"
+    is_synthetic: true
     transcribed_from_sccc: false
     title: "Senior Manager of Operations & Client Services"
     employer: "Cygnus Marketing Communications"
@@ -144,6 +170,7 @@ posting_bank:
   # archetypes. Fully synthetic — no transcription needed.
   # ------------------------------------------------------------------
   - posting_id: "pb_auto_tech_northside"
+    is_synthetic: true
     transcribed_from_sccc: false
     title: "Automotive Service Technician"
     employer: "Northside Auto Group"
@@ -165,6 +192,7 @@ posting_bank:
   # Synthetic electrician posting for the cv_03 journeyman archetype.
   # ------------------------------------------------------------------
   - posting_id: "pb_electrician_puc"
+    is_synthetic: true
     transcribed_from_sccc: false
     title: "Electrician"
     employer: "PUC Services"
@@ -187,6 +215,7 @@ posting_bank:
   # must not promote it for off-domain profiles).
   # ------------------------------------------------------------------
   - posting_id: "pb_admin_assistant_pt"
+    is_synthetic: true
     transcribed_from_sccc: false
     title: "Administrative Assistant"
     employer: "Algoma Family Services"
