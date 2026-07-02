@@ -81,13 +81,31 @@ def invalidate_reference_cache() -> None:
     _REF_CACHE = None
 
 
-def resolve_skill(name: str) -> tuple[str | None, str]:
+def resolve_skill(
+    name: str,
+    *,
+    allow_fuzzy: bool = True,
+) -> tuple[str | None, str]:
     """Resolve free-text skill phrase -> (skill_id, canonical_name).
 
     Strategy:
       1. exact alias / canonical-name match (case-insensitive)
       2. fuzzy match (rapidfuzz token_set_ratio) above SKILL_FUZZY_THRESHOLD
+         -- SKIPPED when allow_fuzzy=False
       3. fallback: return (None, original_name)
+
+    The `allow_fuzzy` kwarg (added 2026-07-01) defaults to True so
+    chat/job/training extractor behavior is unchanged. The resume
+    ingestion path passes allow_fuzzy=False because fuzzy resolution
+    against the current 33-row reference.skill (all OaSIS abstract
+    competencies, empty aliases) produces false-positive skill_id
+    injections for concrete resume vocabulary. Empirically observed:
+    'accounts payable management' fuzzes to 'Time Management'
+    (F.04.b.05) at threshold 0.75, which would corrupt Layer A/C
+    gap detection by claiming the user already has an OaSIS
+    competency they haven't demonstrated. Exact/alias resolution
+    stays safe on the resume path; aliases can be curated later to
+    recover coverage without invention.
     """
     cache = _load_reference_cache()
     if not cache:
@@ -96,6 +114,8 @@ def resolve_skill(name: str) -> tuple[str | None, str]:
     if key in cache:
         sid, canonical = cache[key]
         return sid, canonical
+    if not allow_fuzzy:
+        return None, name
     match = process.extractOne(
         key,
         list(cache.keys()),

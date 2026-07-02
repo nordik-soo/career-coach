@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from config import MIN_EXTRACTION_CONFIDENCE
+from skillbridge.extract.base import resolve_skill
 from skillbridge.match.aliases import canonicalize_skill
 
 
@@ -149,6 +150,13 @@ def _derive_skills_list(facts: dict[str, Any]) -> list[dict[str, Any]]:
     seen_canonical: set[str] = set()
 
     # ---- 1. Skills ----
+    # 2026-07-01: resolve each skill against reference.skill with
+    # allow_fuzzy=False. Populates skill_id when the resume-extracted
+    # name is an EXACT / alias match to an OaSIS competency; leaves
+    # None otherwise. Fuzzy is intentionally OFF because resume vocab
+    # ('accounts payable management') fuzzes to unrelated OaSIS entries
+    # ('Time Management' at threshold 0.75) and corrupts Layer A/C.
+    # See resolve_skill docstring for rationale.
     skills = facts.get("skills") or []
     for s in skills:
         if not isinstance(s, dict):
@@ -158,13 +166,15 @@ def _derive_skills_list(facts: dict[str, Any]) -> list[dict[str, Any]]:
         name = s.get("name")
         if not name:
             continue
+        sid, canonical = resolve_skill(name, allow_fuzzy=False)
         out.append({
-            "skill_name": name,
+            "skill_name": canonical if sid else name,
+            "skill_id": sid,
             "raw_phrase": s.get("evidence"),
             "confidence": float(s.get("confidence") or 0.7),
             "source": "resume",
         })
-        seen_canonical.add(canonicalize_skill(name))
+        seen_canonical.add(canonicalize_skill(canonical if sid else name))
 
     # ---- 2. Certifications promoted as skills ----
     certifications = facts.get("certifications") or []
@@ -181,8 +191,13 @@ def _derive_skills_list(facts: dict[str, Any]) -> list[dict[str, Any]]:
             # confidence is whatever the LLM thought) and skip.
             continue
         seen_canonical.add(key)
+        # Same exact-only resolution for certifications. Most will
+        # remain skill_id=None (certifications are concrete credentials,
+        # not OaSIS competencies), which is correct.
+        sid, canonical = resolve_skill(name, allow_fuzzy=False)
         out.append({
-            "skill_name": name,
+            "skill_name": canonical if sid else name,
+            "skill_id": sid,
             "raw_phrase": c.get("evidence"),
             "confidence": 0.9,
             "source": "resume",

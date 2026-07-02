@@ -353,9 +353,17 @@ def _merge_derived_into_staged(
     # evidence so the responder can cite the resume when narrating a match.
     derived_skills = derived.get("skills") or []
     if derived_skills:
+        # 2026-07-01: preserve skill_id populated by derive.py's
+        # resolve_skill(allow_fuzzy=False) pass. Prior to this the
+        # StagedSkill row lost the resolved ID and Layer A/C fell back
+        # to name-only matching (see the recommender_internal_adjacency
+        # user_ids=0 log-line pathology). d.get("skill_id") is None
+        # for concrete resume vocab that doesn't match reference.skill;
+        # that's the correct, honest fallback.
         new_staged_skills = [
             StagedSkill(
                 skill_name=d["skill_name"],
+                skill_id=d.get("skill_id"),
                 raw_phrase=d.get("raw_phrase"),
                 confidence=float(d.get("confidence") or 0.7),
                 source="resume",
@@ -387,10 +395,14 @@ def _refresh_derived_into_staged(
     staged.skills = [s for s in staged.skills if s.source != "resume"]
 
     # Re-add the (now suppression-filtered) resume skills.
+    # 2026-07-01: preserve skill_id (see _merge_derived_into_staged
+    # rationale). Refresh path mirrors merge path -- both must plumb
+    # so a suppression toggle doesn't silently lose resolved IDs.
     derived_skills = derived.get("skills") or []
     for d in derived_skills:
         staged.skills.append(StagedSkill(
             skill_name=d["skill_name"],
+            skill_id=d.get("skill_id"),
             raw_phrase=d.get("raw_phrase"),
             confidence=float(d.get("confidence") or 0.7),
             source="resume",

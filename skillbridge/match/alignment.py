@@ -61,8 +61,16 @@ class UserSkillRow:
     """One evidence-eligible user skill, with attribution preserved.
 
     Fields:
-      skill_id  — profile.user_skill primary key when available; None
-                  for chat-staged skills not yet normalized.
+      skill_id  — reference.skill.skill_id (canonical OaSIS taxonomy
+                  ID) when the skill was resolved by the extractor
+                  (chat path) or the resume derivation
+                  (skillbridge.resume.derive, 2026-07-01 fix). None
+                  for concrete resume vocabulary that has no
+                  reference.skill entry AND for skills where fuzzy
+                  matching was intentionally skipped. Independent of
+                  whether the user has a persisted profile row --
+                  anonymous users' staged skills carry resolved IDs
+                  identically to signed-up users.
       text      — the ORIGINAL user-typed phrasing. This is what the
                   responder prompt should quote when surfacing "your X"
                   in the coach response. Preserved verbatim.
