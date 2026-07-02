@@ -861,6 +861,15 @@ cases:
       exact after case-folding. Protects against a future
       normalization regression that would silently drop
       case-differing exact matches to fuzzy or (worse) no_match.
+
+      Diagnosis corrected 2026-07-02 (Step 6h): the profile's 6
+      skill_phrases cover all 5 required + 1 preferred on
+      pb_front_desk_quality_inn (same coverage shape as
+      c_front_desk_full_coverage), so the correct diagnosis is
+      READY_TO_APPLY, not PREPARATION_GAP. The prior PREPARATION_GAP
+      assertion was a corpus bug that only "passed" under the
+      pre-Step-6g harness that fed skill_type=None -> engine
+      treated preferred as required.
     categories: ["fuzzy_boundary"]
     profile:
       target_role: "customer service representative"
@@ -870,7 +879,7 @@ cases:
       experience_text: "Front Desk Agent, 3 years"
       work_type_preference: "full-time"
     expect:
-      diagnosis: "PREPARATION_GAP"
+      diagnosis: "READY_TO_APPLY"
       jobs:
         - posting_id: "pb_front_desk_quality_inn"
           band: "stretch"
@@ -890,6 +899,17 @@ cases:
       against (a) canonical alias regression that would break the
       match, and (b) any future opening of fuzzy for credentials
       (which would be a safety regression).
+
+      Diagnosis corrected 2026-07-02 (Step 6h): the profile's 3
+      skill_phrases cover all 3 required on pb_warehouse_whmis
+      (once WHMIS Certification aliases to WHMIS). The only missing
+      skill is forklift operation (preferred, not required), so
+      the correct diagnosis is READY_TO_APPLY, not PREPARATION_GAP.
+      The prior PREPARATION_GAP assertion was a corpus bug that
+      only "passed" under the pre-Step-6g harness that fed
+      skill_type=None -> engine treated preferred as required. The
+      credential-cap-forbidden and matched_required assertions
+      remain the case's primary contract.
     categories: ["credential_gap", "fuzzy_boundary"]
     profile:
       target_role: "warehouse associate"
@@ -898,7 +918,7 @@ cases:
       experience_text: "Warehouse Associate, 2 years"
       work_type_preference: "full-time"
     expect:
-      diagnosis: "PREPARATION_GAP"
+      diagnosis: "READY_TO_APPLY"
       jobs:
         - posting_id: "pb_warehouse_whmis"
           band: "stretch"
