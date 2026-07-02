@@ -141,8 +141,11 @@ def _make_facts(*, skills=None, certifications=None):
 
 def test_derive_skills_populates_skill_id_on_exact_match(monkeypatch):
     """A resume skill that matches an OaSIS canonical name exactly
-    should carry skill_id through the derived dict + canonical name
-    swap."""
+    should carry skill_id through the derived dict.
+
+    Path B (2026-07-02): skill_name is the ORIGINAL resume phrasing,
+    NOT the canonical -- see test_derive_skills_preserves_original_name_after_resolution
+    for the rationale."""
     from skillbridge.extract import base as _base
     from skillbridge.resume.derive import _derive_skills_list
 
@@ -157,7 +160,7 @@ def test_derive_skills_populates_skill_id_on_exact_match(monkeypatch):
     assert len(result) == 1
     row = result[0]
     assert row["skill_id"] == "F.01.b.02"
-    assert row["skill_name"] == "Writing"  # canonical form
+    assert row["skill_name"] == "Writing"  # original input == canonical here
     assert row["source"] == "resume"
 
 
@@ -220,6 +223,94 @@ def test_derive_skills_does_not_produce_ap_to_time_management_false_positive(
             "fuzz-resolved to Time Management (F.04.b.05). This is the "
             "known false positive the exact-only rule prevents."
         )
+
+
+def test_derive_skills_preserves_original_name_after_resolution(monkeypatch):
+    """Path B (2026-07-02): when an alias resolves a resume-vocab tool
+    (e.g. 'microsoft excel') to an OaSIS competency (Digital Literacy
+    at F.01.c.02), the derived dict's skill_name MUST be the original
+    resume phrase, NOT the canonical.
+
+    Rationale: staged.merge_skills dedupes by skill_name.lower(). If
+    we swapped every tool to 'Digital Literacy', all six aliased tools
+    on a typical accounting resume would collapse to ONE staged skill.
+    That reduces user_names diversity and shrinks the Layer C
+    retrieve_candidates pool -- the observed 'labour adjudicator only'
+    surface came from this collapse. Preserving raw names keeps
+    name-based hits alive while skill_id adds id-based hits."""
+    from skillbridge.extract import base as _base
+    from skillbridge.resume.derive import _derive_skills_list
+
+    monkeypatch.setattr(_base, "_REF_CACHE", {
+        "microsoft excel": ("F.01.c.02", "Digital Literacy"),
+        "microsoft word": ("F.01.c.02", "Digital Literacy"),
+        "quickbooks online": ("F.01.c.02", "Digital Literacy"),
+    })
+
+    facts = _make_facts(skills=[
+        {"name": "microsoft excel", "confidence": 0.9, "evidence": "resume"},
+        {"name": "microsoft word", "confidence": 0.9, "evidence": "resume"},
+        {"name": "quickbooks online", "confidence": 0.9, "evidence": "resume"},
+    ])
+    result = _derive_skills_list(facts)
+    assert len(result) == 3
+
+    # All three carry the SAME skill_id (aliased to Digital Literacy)
+    for row in result:
+        assert row["skill_id"] == "F.01.c.02"
+
+    # Path B: each row keeps its ORIGINAL name -- NOT the canonical.
+    names = {row["skill_name"] for row in result}
+    assert names == {"microsoft excel", "microsoft word", "quickbooks online"}
+    # And critically: 'Digital Literacy' MUST NOT appear as a
+    # skill_name -- that swap was the pre-Path-B behavior.
+    assert "Digital Literacy" not in names
+
+
+def test_derive_skills_path_b_gives_ids_plus_names_diversity(monkeypatch):
+    """Path B integration: after derive + merge, user_ids has 1 element
+    (Digital Literacy) but user_names has all 3 raw tool names. Both
+    signals participate in retrieve_candidates -- id-based AND
+    name-based hits are preserved."""
+    from skillbridge.chat.handler import _merge_derived_into_staged
+    from skillbridge.extract import base as _base
+    from skillbridge.match.alignment import (
+        build_user_skill_rows, derive_user_skill_sets,
+    )
+    from skillbridge.resume.derive import derive_staged_slots
+    from skillbridge.session.staging import StagedProfile
+
+    monkeypatch.setattr(_base, "_REF_CACHE", {
+        "microsoft excel": ("F.01.c.02", "Digital Literacy"),
+        "microsoft word": ("F.01.c.02", "Digital Literacy"),
+        "quickbooks online": ("F.01.c.02", "Digital Literacy"),
+    })
+
+    facts = {
+        "skills": [
+            {"name": "microsoft excel", "confidence": 0.9, "evidence": "r"},
+            {"name": "microsoft word", "confidence": 0.9, "evidence": "r"},
+            {"name": "quickbooks online", "confidence": 0.9, "evidence": "r"},
+        ],
+        "certifications": [], "work_history": [], "education": [],
+    }
+    derived = derive_staged_slots(facts)
+    staged = StagedProfile.new(session_id="test-path-b")
+    _merge_derived_into_staged(staged, derived)
+
+    rows = build_user_skill_rows(staged.skills)
+    user_ids, user_names, _ = derive_user_skill_sets(rows)
+
+    # ID signal: deduped to one competency.
+    assert user_ids == {"F.01.c.02"}
+
+    # NAME signal: three distinct tool names preserved.
+    assert "microsoft excel" in user_names
+    assert "microsoft word" in user_names
+    assert "quickbooks online" in user_names
+    # And 'digital literacy' is NOT in the names set (pre-Path-B
+    # behavior would have added it there instead).
+    assert "digital literacy" not in user_names
 
 
 def test_derive_certifications_also_go_through_exact_only_resolver(monkeypatch):

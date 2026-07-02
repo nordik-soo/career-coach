@@ -157,6 +157,21 @@ def _derive_skills_list(facts: dict[str, Any]) -> list[dict[str, Any]]:
     # ('accounts payable management') fuzzes to unrelated OaSIS entries
     # ('Time Management' at threshold 0.75) and corrupts Layer A/C.
     # See resolve_skill docstring for rationale.
+    #
+    # 2026-07-02 (Path B): preserve the ORIGINAL skill_name even when
+    # the resolver returns a canonical form. Rationale: staged.merge_skills
+    # dedupes by skill_name.lower() -- so if we swapped "microsoft excel",
+    # "microsoft word", "quickbooks online", "adobe acrobat" all to the
+    # canonical "Digital Literacy", they'd collapse into ONE staged
+    # skill and we'd lose 3-5 name-based retrieval hits against SSM
+    # postings that literally say "microsoft excel" etc. By keeping the
+    # raw name AND populating skill_id, each tool gets:
+    #   - name-based retrieval hit ("microsoft excel" matches job postings
+    #     that mention "microsoft excel")
+    #   - id-based retrieval hit (F.01.c.02 matches job postings that
+    #     require Digital Literacy per reference.noc_skill)
+    # user_ids stays deduped (it's a set); user_names gains diversity.
+    # Layer C candidate pool widens accordingly.
     skills = facts.get("skills") or []
     for s in skills:
         if not isinstance(s, dict):
@@ -166,15 +181,15 @@ def _derive_skills_list(facts: dict[str, Any]) -> list[dict[str, Any]]:
         name = s.get("name")
         if not name:
             continue
-        sid, canonical = resolve_skill(name, allow_fuzzy=False)
+        sid, _canonical = resolve_skill(name, allow_fuzzy=False)
         out.append({
-            "skill_name": canonical if sid else name,
+            "skill_name": name,  # Path B: preserve raw name for retrieval diversity
             "skill_id": sid,
             "raw_phrase": s.get("evidence"),
             "confidence": float(s.get("confidence") or 0.7),
             "source": "resume",
         })
-        seen_canonical.add(canonicalize_skill(canonical if sid else name))
+        seen_canonical.add(canonicalize_skill(name))
 
     # ---- 2. Certifications promoted as skills ----
     certifications = facts.get("certifications") or []
@@ -194,9 +209,11 @@ def _derive_skills_list(facts: dict[str, Any]) -> list[dict[str, Any]]:
         # Same exact-only resolution for certifications. Most will
         # remain skill_id=None (certifications are concrete credentials,
         # not OaSIS competencies), which is correct.
-        sid, canonical = resolve_skill(name, allow_fuzzy=False)
+        # Path B: preserve raw certification name (same rationale as
+        # the skills block above).
+        sid, _canonical = resolve_skill(name, allow_fuzzy=False)
         out.append({
-            "skill_name": canonical if sid else name,
+            "skill_name": name,
             "skill_id": sid,
             "raw_phrase": c.get("evidence"),
             "confidence": 0.9,
