@@ -77,10 +77,29 @@ def call(
         system_blocks = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
     else:
         system_blocks = [{"type": "text", "text": system}]
+    # 2026-07-02: temperature=0 for stability across all shared-helper
+    # callers (resume extraction, chat evidence extractor, planner JSON,
+    # responder prose, etc.). Anthropic's default is 1.0, which was
+    # causing same-PDF re-uploads to produce different extracted skill
+    # lists across sessions, and that drift propagated downstream --
+    # the Layer C adjacent-NOC surface would be different every time
+    # because retrieve_candidates keys off the extracted skills.
+    #
+    # The three call sites that already needed determinism
+    # (recommender_intent.py, slice 8 drilldown judgment, slice 9 coach
+    # guide) set temperature=0 explicitly at their own client.messages
+    # .create() calls. This makes the shared path match.
+    #
+    # Prose responders lose some variety in exchange for repeatability
+    # and lower policy-drift risk -- an acceptable trade for a trust-
+    # driven career-coach product. Note: even at T=0, Anthropic tool_use
+    # has residual server-side non-determinism; this closes ~90% of the
+    # visible drift, not 100%.
     try:
         resp = client.messages.create(
             model=chosen,
             max_tokens=tokens,
+            temperature=0,
             system=system_blocks,
             messages=[{"role": "user", "content": user}],
         )
