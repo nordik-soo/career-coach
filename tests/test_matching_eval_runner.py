@@ -284,7 +284,10 @@ class RunOutcome:
 
 def _run_engine_for_case(case: Case) -> RunOutcome:
     from skillbridge.chat.inventory_diagnosis import diagnose
-    from skillbridge.match.engine import compute_matches_in_memory
+    from skillbridge.match.engine import (
+        compute_matches_in_memory,
+        is_credential_skill_name,
+    )
 
     staged = _build_staged_profile(case)
 
@@ -293,18 +296,33 @@ def _run_engine_for_case(case: Case) -> RunOutcome:
     except Exception as exc:  # noqa: BLE001
         return RunOutcome(engine_error=f"engine raised: {type(exc).__name__}: {exc}")
 
-    # Diagnosis inputs. Step 6b fixed target_posting_count only; the
-    # other heuristics (enough_to_match, usable_evidence_present,
-    # snapshot_usable, skill_adjacent_results) stay naive here.
-    # Subsequent Step 6c/6d etc. investigate remaining disagreements.
-    enough_to_match = bool(case.profile.skill_phrases) and bool(
-        (case.profile.target_role or "").strip()
+    # Diagnosis inputs. Step 6c (2026-07-02) refined enough_to_match /
+    # usable_evidence_present so credentials-only profiles fail the
+    # "enough evidence to score against jobs" check. is_credential_
+    # skill_name is the same helper the engine uses for credential
+    # classification (engine.py:772), so this harness signal is
+    # code-consistent, not a made-up heuristic.
+    #
+    # Rule: at least one NON-CREDENTIAL skill OR non-empty
+    # experience_text is required to consider the profile
+    # usable/enough. WHMIS + first aid alone (no work-history skills)
+    # is thin evidence, not scoreable evidence.
+    has_non_credential_skill = any(
+        not is_credential_skill_name(phrase)
+        for phrase in case.profile.skill_phrases
+        if phrase
     )
-    usable_evidence_present = bool(case.profile.skill_phrases) or bool(
-        case.profile.experience_text
+    has_experience = bool(case.profile.experience_text)
+    substantive_evidence = has_non_credential_skill or has_experience
+
+    enough_to_match = (
+        bool((case.profile.target_role or "").strip())
+        and substantive_evidence
     )
+    usable_evidence_present = substantive_evidence
+
     engine_completed = True
-    snapshot_usable = True  # not yet parameterized by case
+    snapshot_usable = True  # not yet parameterized by case; Step 6d
 
     target_noc = _target_noc_for_case(case, _CORPUS)
     if target_noc is None:
