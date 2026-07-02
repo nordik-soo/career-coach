@@ -87,14 +87,24 @@ def _posting_to_job_row(p: Posting) -> dict[str, Any]:
 
 
 def _posting_to_skill_rows(p: Posting) -> list[dict[str, Any]]:
-    """Project a Posting's skills into the rows _fetch_job_skills returns."""
+    """Project a Posting's skills into the rows _fetch_job_skills returns.
+
+    Step 6g (2026-07-02): engine reads `skill_type` (engine.py:242) --
+    NOT `source`. Prior harness projected `source` only, so the engine
+    saw skill_type=None -> defaulted every skill to 'required' ->
+    preferred skills incorrectly counted against required_missing ->
+    READY_TO_APPLY unreachable for full-coverage cases like
+    c_front_desk_full_coverage. Fix: write `skill_type` matching the
+    engine's contract; keep `source` too as a debugging alias.
+    """
     rows: list[dict[str, Any]] = []
     for i, s in enumerate(p.skills):
         rows.append({
             "skill_id": None,          # synthetic; not in reference.skill
             "skill_name": s.name,
             "importance_rank": i + 1,
-            "source": s.requirement,   # required | preferred
+            "skill_type": s.requirement,   # engine contract field
+            "source": s.requirement,       # legacy alias; debug aid
         })
     return rows
 
