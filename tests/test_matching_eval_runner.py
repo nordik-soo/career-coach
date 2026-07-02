@@ -227,6 +227,24 @@ def _build_staged_profile(case: Case):
 
 
 # ---------------------------------------------------------------------------
+# Step 6e (2026-07-02): case-level override for snapshot_usable.
+# ---------------------------------------------------------------------------
+# Cases that intentionally pin the MARKET_DATA_UNAVAILABLE diagnosis
+# branch cannot produce that outcome under normal operation with a
+# frozen posting bank -- diagnose() only routes there when
+# snapshot_usable is False. This set names the corpus cases whose
+# expectation depends on that override.
+#
+# The alternative shape (encoding snapshot_usable in the YAML per
+# case) is deferred to a future schema bump if more cases start
+# needing per-case diagnosis-signal control. For now the set is
+# small and lives in the runner.
+_MARKET_DATA_UNAVAILABLE_CASES: frozenset[str] = frozenset({
+    "c_market_data_unavailable_stub",
+})
+
+
+# ---------------------------------------------------------------------------
 # Step 6b (2026-07-02): target NOC derivation for diagnose() input.
 # ---------------------------------------------------------------------------
 # The Step 6a harness computed target_posting_count as the count of
@@ -342,8 +360,15 @@ def _run_engine_for_case(case: Case) -> RunOutcome:
     )
     usable_evidence_present = substantive_evidence
 
+    # Step 6e (2026-07-02): case-level snapshot_usable override for
+    # cases whose intent pins the MARKET_DATA_UNAVAILABLE diagnosis
+    # branch. Engine did NOT crash -- the market data is unreachable
+    # (rule 2 in diagnose), which is different from engine_completed=
+    # False (pre-rule 0 for engine failure). Keeping engine_completed
+    # True and toggling snapshot_usable False cleanly exercises the
+    # market_data_unavailable_snapshot path.
     engine_completed = True
-    snapshot_usable = True  # not yet parameterized by case; Step 6d
+    snapshot_usable = case.case_id not in _MARKET_DATA_UNAVAILABLE_CASES
 
     target_noc = _target_noc_for_case(case, _CORPUS)
     if target_noc is None:
