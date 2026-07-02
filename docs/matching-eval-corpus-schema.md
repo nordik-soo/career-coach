@@ -78,10 +78,31 @@ Field notes:
 | Field | Required | Purpose |
 |---|---|---|
 | `posting_id` | yes | Referenced by cases. Once published in a tagged corpus version, never delete or repurpose — supersede with a new id and mark the old one `retired: true` so historical calibration reports stay comparable |
+| `transcribed_from_sccc` | yes | Boolean. `true` means the posting was copied verbatim from a real live SCCC row (title / employer / NOC / skills / requirement labels / credential flags) at the timestamp in the corpus header, then frozen. `false` means the posting was NOT copied from live SCCC — see the semantic-overload note below |
 | `posted_days_ago` | yes | The suite resolves dates against a frozen anchor date (loader constant), so recency-boost behaviour is deterministic and never ages out |
 | `skills[].requirement` | yes | The corpus asserts required/preferred labels directly. This is the JD-extractor's *output* contract, deliberately: the eval measures the engine, not the extractor. Extractor quality gets its own corpus later — do not conflate them (this is the lesson from the removed F6 fixture) |
 | `skills[].is_credential` | yes | Explicit, not inferred via `is_credential_skill_name` at load. A CI check asserts the flag agrees with `is_credential_skill_name` and fails loudly on disagreement — that disagreement is a real bug in one of the two places |
 | `embedding_profile` | no | Default `"default"`. See §Semantic determinism |
+
+**Semantic overload on `transcribed_from_sccc: false`.** The current single boolean
+conflates two distinct posting states:
+
+- **Reconstruction pending:** the posting represents a real SCCC row that has NOT yet
+  been copied verbatim into the corpus. The header (`data/matching_eval_corpus.yaml`
+  top-of-file `POSTING TRANSCRIPTION` note) explicitly names which postings are in
+  this state. These must be transcribed before the corpus gates CI.
+- **Synthetic by design:** the posting is a fully-constructed test artifact for a
+  specific classifier scenario (e.g. a part-time admin posting to exercise the
+  work-type cap). Inline comments in the YAML mark these with "Synthetic — no
+  transcription needed." These must NEVER be transcribed; doing so would remove the
+  scenario from the corpus.
+
+The `transcribed_from_sccc: false` flag currently applies to BOTH states, and which
+state a specific posting is in is communicated only via YAML comments. A future
+schema bump may introduce an `is_synthetic: bool` field to disambiguate. Deferred
+to keep this correction pass scoped to schema language only. Until then, treat the
+YAML header's `POSTING TRANSCRIPTION` list as the authoritative source for which
+postings still owe SCCC transcription work.
 
 ## Case entries
 
@@ -143,17 +164,58 @@ cases:
 
 | Field | Required | Purpose |
 |---|---|---|
-| `band` | yes | Closed enum. `none` means the job surfaces in no tier |
+| `band` | yes | Closed enum (tier `MatchLabel`, see §Vocabularies). `none` means the job surfaces in no tier |
+| `band_at_least` | no | Boolean modifier on `band`. When `true`, `band` is interpreted as a MINIMUM — the case passes when the actual `MatchLabel` is at that band OR any strictly stronger band (ordered `strong > good > stretch > explore_later > none`). Default `false` (exact-match). Used for happy-path cases where either `good` or `strong` is legitimately correct because both map to the same `apply_today` tier slot under v6 |
 | `cap_reasons` | yes (may be `[]`) | Exact set semantics: every listed reason must be present in `score_explanation.caps_applied`. Closed vocabulary, §Vocabularies |
 | `cap_reasons_forbidden` | no | Reasons that must NOT fire. This encodes the F2 lesson: "holding Class G removes the cap, band may legitimately stay stretch." Asserting absence is a first-class expectation, not a comment |
 | `matched_required` | no | List of `{requirement, via_stage, user_skill}` triples asserted against `build_skill_alignment` output. `via_stage` uses the closed stage vocabulary. This is what makes stage provenance a *pinned contract* before M3 surfaces it to users — if a skill silently slips from `exact` to `semantic`, the corpus catches it even though the band didn't move |
-| `missing_required_contains` | no | Substring-tolerant (engine phrasing drifts with alias curation); everything else in this schema is exact-match |
+| `missing_required_contains` | no | Substring-tolerant (engine phrasing drifts with alias curation); everything else in this schema is exact-match. **Assertion shape does NOT count-partition** — it only checks presence, not credential-vs-learnable-gap counts (see §MatchLabel derivation below) |
 | `blocking_credential` | no | Asserts `_has_critical_credential_gap` identified this specific credential |
+
+### MatchLabel derivation (`tiered_evidence.py:567-604`, scoring-v6)
+
+The tier `MatchLabel` a job receives is derived from **three signals**, not one:
+
+- **Score band** — result of `_band(score)`: `strong / good / stretch / low`
+- **Blocker count** — number of credential gaps in `required_missing`
+  (`is_credential_skill_name == True`)
+- **Learnable count** — number of non-credential gaps in `required_missing`
+
+Decision flow (top-down, first matching rule wins):
+
+```
+0. Filtered → None:
+   - match_eligible is False
+   - match_score < 0.30 (visibility floor)
+   - score_explanation.required_missing absent
+   - credential-only gap profile AND no actionable training
+
+1. band == "low" (0.30 ≤ score < 0.40)          → explore_later
+2. learnable_count >= 5                          → explore_later
+3. blocker_count >= 2                            → explore_later
+4. band == "stretch"                             → stretch
+5. band in {strong, good} AND learnable in 3..4  → stretch
+6. band in {strong, good} AND blocker_count == 1 → stretch
+7. band == "strong" (no blocker, ≤2 learnable)   → strong
+8. band == "good"   (no blocker, ≤2 learnable)   → good
+```
+
+**Corpus implication:** a case pinned to `band: "good"` implicitly asserts that the
+profile produces `blocker_count == 0` AND `learnable_count ≤ 2` AND raw score band
+is `good`. If the classifier moves the label because the profile actually has 3+
+learnable gaps, the corpus catches a `band` disagreement but currently has no way to
+independently pin the **why** (which of the three signals differed).
+
+**Known assertion gap:** the current schema does NOT expose `expected_blocker_count` /
+`expected_learnable_count` per-job fields. Adding them would let cases pin classifier
+rules directly (e.g. "this profile has 4 learnable gaps → rule 5 → stretch"). Deferred
+to a future schema bump; for now, cases assert only the final `band` and rely on the
+`description` block to name the classifier rule under test.
 
 ## Vocabularies (closed, copied from engine — do not invent)
 
 ```yaml
-band:                [strong, good, stretch, explore, none]
+band:                [strong, good, stretch, explore_later, none]
 via_stage:           [exact, fuzzy, semantic]                    # no_match is not assertable as a stage
 cap_reasons:         [band_capped_by_credential,
                       band_capped_by_no_experience,
@@ -169,10 +231,44 @@ categories:          [credential_gap, cap_semantics, no_match, negative_control,
 updated in the same PR, with at least one new case exercising it. An engine enum value
 with zero corpus coverage fails CI (§Validation, policy layer).
 
+**Note on `band`:** the corpus's `band` field asserts against the tier `MatchLabel`
+(`tiered_evidence.py:564`, produced by `_classify_match_label`), NOT the raw score band
+from `_band()` (`engine.py:730-737`). Two distinct layers exist in code:
+
+- **Score band** (`_band(score)` returns `strong / good / stretch / low`): the raw score
+  cutoff, driven by `MATCH.band_strong / band_good / band_stretch` thresholds
+  (`config.py:438-440`, currently 0.75 / 0.60 / 0.40)
+- **Tier MatchLabel** (`strong / good / stretch / explore_later`): the user-facing tier
+  outcome, derived from three signals (see the learnable-gap note under
+  §Per-job expectation fields). The corpus asserts the tier label because that is what
+  users actually see. A raw-band `low` score maps to the tier label `explore_later` via
+  rule 1 of `_classify_match_label`. `none` in the corpus vocabulary means the case's
+  `_classify_match_label` returned `None` — the job was filtered before tier assignment
+  (fail-closed on missing `required_missing`, sub-visibility-floor score, or
+  "actionable nothing" credential-only-gap-with-no-training).
+
+### Tier semantics (v6, `tiered_evidence.py:186-213`)
+
+Under v6 (scoring-v6, locked 2026-06-17), the user-facing `TieredEvidence` bundle has
+three direct-target tier slots plus one adjacent-role slot, and multiple `MatchLabel`
+values map to a single direct-target slot:
+
+```
+apply_today     ← jobs with MatchLabel in {strong, good}    (shared slot)
+worth_a_try     ← jobs with MatchLabel == stretch
+explore_later   ← jobs with MatchLabel == explore_later
+sideways_move   ← adjacent-NOC jobs (unchanged; not classifier-controlled)
+```
+
+The shared `apply_today` slot is why a case can legitimately pin `band: "good"` with
+`band_at_least: true` (see next section) — either a `good` or a `strong` MatchLabel
+satisfies "surfaces under apply_today," and the case shouldn't fail if the engine picked
+one over the other for a borderline profile.
+
 **Note on `via_stage`:** the internal cascade has more rungs (skill_id → name exact → canonical
 → substring → fuzzy → semantic), but `build_skill_alignment` exposes the three-value
-stage. The corpus pins the exposed contract. If M3 promotes finer rungs into the alignment
-output, that is a corpus schema bump with a migration note.
+stage (`alignment.py:94`). The corpus pins the exposed contract. If M3 promotes finer rungs
+into the alignment output, that is a corpus schema bump with a migration note.
 
 ## Semantic determinism
 
@@ -210,6 +306,17 @@ Minimum case counts per category, asserted by a structural test:
 | `ready_to_apply` / `direct_title` / `adjacent_only` | 6 | The happy paths, so a regression can't hide behind "all the failure cases still fail correctly" |
 
 **Total floor: 36 cases. Target for v1: 45–55.**
+
+**Known gap: `explore_later` tier has no dedicated coverage.** Under v6
+(`tiered_evidence.py:567-604`) `explore_later` is a first-class user-facing tier with
+its own classifier rules (`band == "low"`; `learnable_count >= 5`;
+`blocker_count >= 2`). None of the current categories exercises those rules
+specifically — cases exercising them fall under `cap_semantics` or `thin_evidence`
+today. Adding an `explore_later` category with its own minimum count is deferred to
+the coverage-fill slice (Step 5), not this schema-correction pass, because it changes
+the floor from 36 to 39+ and introduces a new category policy before real cases
+exist. Contributors filling coverage in Step 5 should decide whether to add the
+category or subsume `explore_later` cases under the existing ones.
 
 ## Validation — the three-layer split
 
