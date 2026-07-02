@@ -1,0 +1,614 @@
+# SkillBridge SSM — Matching Eval Corpus (v1 seed)
+#
+# This file is the frozen gold-label truth table for the matching engine.
+# See docs/matching-eval-corpus-schema.md for the field reference and the
+# loader / CI / human-review validation split.
+#
+# ====================================================================
+# REVIEW STATUS: PENDING HUMAN VERIFICATION
+# ====================================================================
+# Two things REQUIRE lead-engineer action before this corpus gates CI:
+#
+#   1. POSTING TRANSCRIPTION. pb_truck_coach_grfn, pb_ops_manager_cygnus,
+#      and pb_front_desk_quality_inn are reconstructed from fixture
+#      comments in test_matching_fixtures.py, NOT transcribed from the
+#      live SCCC rows. Do the one-time copy from core.v_current_job +
+#      extracted skills (exact names, requirement labels, credential
+#      flags), then mark each posting `transcribed_from_sccc: true`.
+#      After transcription the bank is authoritative and immutable.
+#
+#   2. EXPECTATION REVIEW. Cases tagged `expectation_status: authored`
+#      encode intended behaviour, not verified engine output. First
+#      suite run will show disagreements; each one is EITHER an engine
+#      bug OR a wrong expectation — resolve per the human-review rule
+#      in the schema doc, never by blind-updating to whatever the
+#      engine emitted. Cases tagged `transcribed` carry expectations
+#      copied from fixtures that pass today.
+# ====================================================================
+#
+# Seed coverage vs. the CI floor (36): this seed has 17 cases. Gaps to
+# fill before flipping CI to the corpus, by category:
+#   credential_gap        4/6   (need: regulated non-trade case, 309A-missing case)
+#   negative_control      2/4   (need: 2 more off-domain profiles)
+#   no_match/thin         3/6   (need: MARKET_DATA_UNAVAILABLE engine-failure
+#                                injection; more UNDETERMINED shapes)
+#   semantic+fuzzy        3/8   (need: fuzzy_boundary pairs both sides;
+#                                more threshold-adjacent cosine pairs)
+#   cap/work_type/family  3/6   (need: family_gate leakage case with
+#                                jobs_absent; second work_type shape)
+#   happy paths           5/6   (need: adjacent_only case once the
+#                                SKILL_ADJACENT_AVAILABLE input shape is pinned)
+
+corpus_version: 1
+corpus_verified_at: null          # set after end-to-end review
+engine_version_pinned: "job-match-v1.2.0"
+
+# The frozen anchor date `posted_days_ago` resolves against. Loader
+# constant mirrors this; recency boosts are deterministic forever.
+frozen_today: "2026-07-01"
+
+# ====================================================================
+# Embedding fixtures — the ONLY pairs with nonzero cosine in the eval
+# harness. _semantic_match_strength's lookup is monkeypatched to this
+# table; unlisted pairs resolve to 0.0. Threshold is 0.70, semantic
+# strength cap 0.75 (config.py:415).
+# ====================================================================
+embedding_fixtures:
+  - a: "client intake coordination"
+    b: "customer onboarding"
+    cosine: 0.74        # above threshold -> matches, strength capped 0.75
+  - a: "front desk reception"
+    b: "customer onboarding"
+    cosine: 0.68        # below threshold -> must NOT match
+
+# ====================================================================
+# POSTING BANK
+# ====================================================================
+posting_bank:
+
+  # ------------------------------------------------------------------
+  # Garden River truck & coach posting. Skill list reconstructed from
+  # F1/F9/F11 fixture comments ("top-12 skills", Class G at
+  # importance_rank 9 — below the old top-5 cutoff, which is what the
+  # slice 4b carve-out cases exercise). TRANSCRIBE FROM SCCC.
+  # ------------------------------------------------------------------
+  - posting_id: "pb_truck_coach_grfn"
+    transcribed_from_sccc: false
+    title: "Truck and Coach Technician"
+    employer: "Garden River First Nation"
+    noc_code: "72410"
+    location: "Garden River, ON"
+    region_code: "SSM"
+    employment_type: "full-time"
+    posted_days_ago: 5
+    skills:
+      - { name: "truck service and maintenance",        requirement: "required",  is_credential: false }
+      - { name: "emergency roadside repair",            requirement: "required",  is_credential: false }
+      - { name: "motor vehicle inspection",             requirement: "required",  is_credential: false }
+      - { name: "emissions testing",                    requirement: "required",  is_credential: false }
+      - { name: "wheel end inspection",                 requirement: "required",  is_credential: false }
+      - { name: "310T certificate of qualification",    requirement: "required",  is_credential: true }
+      - { name: "MTO contract supervision",             requirement: "required",  is_credential: false }
+      - { name: "class g driver's license",             requirement: "required",  is_credential: true }   # rank 9 in v1.2.0
+      - { name: "welding",                              requirement: "preferred", is_credential: false }
+      - { name: "parts fabrication",                    requirement: "preferred", is_credential: false }
+      - { name: "first nation cultural knowledge",      requirement: "preferred", is_credential: false }
+    embedding_profile: "default"
+
+  # ------------------------------------------------------------------
+  # Quality Inn front desk (F5/F7, cv_04 archetype). TRANSCRIBE.
+  # ------------------------------------------------------------------
+  - posting_id: "pb_front_desk_quality_inn"
+    transcribed_from_sccc: false
+    title: "Front Desk Agent"
+    employer: "Quality Inn Bay Front"
+    noc_code: "64314"
+    location: "Sault Ste. Marie, ON"
+    region_code: "SSM"
+    employment_type: "full-time"
+    posted_days_ago: 3
+    skills:
+      - { name: "guest check-in",                requirement: "required",  is_credential: false }
+      - { name: "reservation management",        requirement: "required",  is_credential: false }
+      - { name: "property management system",    requirement: "required",  is_credential: false }
+      - { name: "customer service",              requirement: "required",  is_credential: false }
+      - { name: "payment processing",            requirement: "required",  is_credential: false }
+      - { name: "phone communication",           requirement: "preferred", is_credential: false }
+      - { name: "conflict resolution",           requirement: "preferred", is_credential: false }
+    embedding_profile: "default"
+
+  # ------------------------------------------------------------------
+  # Cygnus ops manager (F4 title-match fast path, cv_01 archetype).
+  # TRANSCRIBE — skill list here is a plausible stand-in.
+  # ------------------------------------------------------------------
+  - posting_id: "pb_ops_manager_cygnus"
+    transcribed_from_sccc: false
+    title: "Senior Manager of Operations & Client Services"
+    employer: "Cygnus Marketing Communications"
+    noc_code: "10019"
+    location: "Sault Ste. Marie, ON"
+    region_code: "SSM"
+    employment_type: "full-time"
+    posted_days_ago: 10
+    skills:
+      - { name: "client relationship management",  requirement: "required",  is_credential: false }
+      - { name: "operations planning",             requirement: "required",  is_credential: false }
+      - { name: "team leadership",                 requirement: "required",  is_credential: false }
+      - { name: "budget management",               requirement: "required",  is_credential: false }
+      - { name: "customer onboarding",             requirement: "required",  is_credential: false }
+      - { name: "crm systems",                     requirement: "preferred", is_credential: false }
+    embedding_profile: "default"
+
+  # ------------------------------------------------------------------
+  # Synthetic automotive posting for the meeting_01/meeting_02 310S
+  # archetypes. Fully synthetic — no transcription needed.
+  # ------------------------------------------------------------------
+  - posting_id: "pb_auto_tech_northside"
+    transcribed_from_sccc: false
+    title: "Automotive Service Technician"
+    employer: "Northside Auto Group"
+    noc_code: "72410"
+    location: "Sault Ste. Marie, ON"
+    region_code: "SSM"
+    employment_type: "full-time"
+    posted_days_ago: 2
+    skills:
+      - { name: "automotive diagnostics",               requirement: "required",  is_credential: false }
+      - { name: "brake system repair",                  requirement: "required",  is_credential: false }
+      - { name: "preventive maintenance",               requirement: "required",  is_credential: false }
+      - { name: "310S certificate of qualification",    requirement: "required",  is_credential: true }
+      - { name: "class g driver's license",             requirement: "required",  is_credential: true }
+      - { name: "electrical systems troubleshooting",   requirement: "preferred", is_credential: false }
+    embedding_profile: "default"
+
+  # ------------------------------------------------------------------
+  # Synthetic electrician posting for the cv_03 journeyman archetype.
+  # ------------------------------------------------------------------
+  - posting_id: "pb_electrician_puc"
+    transcribed_from_sccc: false
+    title: "Electrician"
+    employer: "PUC Services"
+    noc_code: "72200"
+    location: "Sault Ste. Marie, ON"
+    region_code: "SSM"
+    employment_type: "full-time"
+    posted_days_ago: 7
+    skills:
+      - { name: "electrical installation",              requirement: "required",  is_credential: false }
+      - { name: "electrical code compliance",           requirement: "required",  is_credential: false }
+      - { name: "309A certificate of qualification",    requirement: "required",  is_credential: true }
+      - { name: "preventive maintenance",               requirement: "required",  is_credential: false }
+      - { name: "blueprint reading",                    requirement: "preferred", is_credential: false }
+    embedding_profile: "default"
+
+  # ------------------------------------------------------------------
+  # Part-time admin posting — exists to exercise the work-type cap and
+  # to serve as leak-bait for negative controls (generic-skill overlap
+  # must not promote it for off-domain profiles).
+  # ------------------------------------------------------------------
+  - posting_id: "pb_admin_assistant_pt"
+    transcribed_from_sccc: false
+    title: "Administrative Assistant"
+    employer: "Algoma Family Services"
+    noc_code: "13110"
+    location: "Sault Ste. Marie, ON"
+    region_code: "SSM"
+    employment_type: "part-time"
+    posted_days_ago: 4
+    skills:
+      - { name: "scheduling",             requirement: "required",  is_credential: false }
+      - { name: "document management",    requirement: "required",  is_credential: false }
+      - { name: "customer service",       requirement: "required",  is_credential: false }
+      - { name: "data entry",             requirement: "preferred", is_credential: false }
+    embedding_profile: "default"
+
+# ====================================================================
+# CASES
+# ====================================================================
+cases:
+
+  # ==================================================================
+  # Credential-gap block (F1 / F2 / F8 / F11 lineage)
+  # ==================================================================
+
+  - case_id: "c_truck_coach_no_class_g"
+    expectation_status: "transcribed"      # F1, passes_today
+    description: >-
+      Truck & coach apprentice without an explicit Class G claim.
+      Credential cap MUST fire regardless of skill overlap — the cap
+      reason is the actionable signal, not the band.
+    categories: ["credential_gap", "cap_semantics"]
+    profile:
+      target_role: "truck and coach technician apprentice"
+      skill_phrases: ["welding", "truck maintenance", "vehicle inspection",
+                      "parts fabrication", "diesel repair"]
+      experience_text: "Apprentice Truck & Coach Technician at Northern Fleet Services (2023-present)"
+      education_text: "Truck & Coach Technician Apprenticeship — Sault College"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_truck_coach_grfn"
+          band: "stretch"
+          cap_reasons: ["band_capped_by_credential"]
+          matched_required:
+            - { requirement: "motor vehicle inspection", via_stage: "fuzzy", user_skill: "vehicle inspection" }
+          missing_required_contains: ["class g"]
+          blocking_credential: "class g driver's license"
+
+  - case_id: "c_truck_coach_with_class_g"
+    expectation_status: "transcribed"      # F2, passes_today
+    description: >-
+      Same apprentice WITH Class G. v1.2.0 vocabulary is specialized
+      enough that the band honestly stays stretch — but the credential
+      cap must NOT fire. Absence of the cap is the pinned contract.
+    categories: ["credential_gap", "cap_semantics"]
+    profile:
+      target_role: "truck and coach technician"
+      skill_phrases: ["welding", "truck maintenance", "vehicle inspection",
+                      "parts fabrication", "diesel repair",
+                      "Class G driver's license"]
+      experience_text: "Apprentice Truck & Coach Technician at Northern Fleet Services"
+      education_text: "Truck & Coach Technician Apprenticeship — Sault College"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_truck_coach_grfn"
+          band: "stretch"
+          cap_reasons: []
+          cap_reasons_forbidden: ["band_capped_by_credential"]
+          matched_required:
+            - { requirement: "class g driver's license", via_stage: "exact", user_skill: "Class G driver's license" }
+
+  - case_id: "c_alias_licence_spelling"
+    expectation_status: "transcribed"      # F8, fails_today_fixed_by_v2
+    description: >-
+      British 'licence' must canonicalise to the JD's American
+      'license'. Contract: class g appears in matched_required via the
+      exact (canonical) stage, and the credential cap does not fire.
+    categories: ["credential_gap", "fuzzy_boundary"]
+    profile:
+      target_role: "truck and coach technician"
+      skill_phrases: ["welding", "truck maintenance", "vehicle inspection",
+                      "Class G licence"]
+      experience_text: "Apprentice Truck & Coach Technician"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_truck_coach_grfn"
+          band: "stretch"
+          cap_reasons_forbidden: ["band_capped_by_credential"]
+          matched_required:
+            - { requirement: "class g driver's license", via_stage: "exact", user_skill: "Class G licence" }
+
+  - case_id: "c_credential_below_topn_visible"
+    expectation_status: "transcribed"      # F11, passes_today
+    description: >-
+      Class G ranks 9 in v1.2.0 extraction — past the old top-5
+      cutoff. The slice 4b carve-out must keep it in the matching set
+      so the cap can fire honestly when the user lacks it. Vocabulary-
+      independent intent: any credential below top-N must remain
+      visible in required_missing.
+    categories: ["credential_gap", "cap_semantics"]
+    profile:
+      target_role: "truck and coach technician"
+      skill_phrases: ["welding", "truck maintenance", "vehicle inspection",
+                      "parts fabrication", "outdoor work"]
+      experience_text: "Apprentice Truck & Coach Technician (2 years)"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_truck_coach_grfn"
+          band: "stretch"
+          cap_reasons: ["band_capped_by_credential"]
+          missing_required_contains: ["class g"]
+          blocking_credential: "class g driver's license"
+
+  # ==================================================================
+  # Negative controls (F3 / cv_05 / meeting_03 lineage)
+  # ==================================================================
+
+  - case_id: "c_software_dev_negative_control"
+    expectation_status: "authored"
+    description: >-
+      Software developer profile, no software postings in the bank.
+      Generic-skill overlap (customer service adjacency, data entry)
+      must not promote the admin posting or anything else. Diagnosis:
+      target NOC has zero local postings and strict-AND adjacency
+      should return empty -> NO_OPPORTUNITY_FOUND. VERIFY on first
+      run: if adjacency legitimately fires, the right fix is
+      tightening accept_candidates, not relaxing this expectation.
+    categories: ["negative_control", "no_match"]
+    profile:
+      target_role: "software developer"
+      skill_phrases: ["Python", "React", "PostgreSQL", "Docker", "AWS",
+                      "machine learning", "data analysis"]
+      experience_text: "Data Analyst at Telus International (5 years)"
+      education_text: "BSc Computer Science, University of Toronto"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "NO_OPPORTUNITY_FOUND"
+      jobs_absent: ["pb_truck_coach_grfn", "pb_front_desk_quality_inn",
+                    "pb_ops_manager_cygnus", "pb_auto_tech_northside",
+                    "pb_electrician_puc", "pb_admin_assistant_pt"]
+
+  - case_id: "c_airline_pilot_negative_control"
+    expectation_status: "authored"         # meeting_03 archetype
+    description: >-
+      Airline pilot profile. Zero target-NOC postings, no credible
+      skill adjacency into the bank. Nothing surfaces.
+    categories: ["negative_control", "no_match"]
+    profile:
+      target_role: "airline pilot"
+      skill_phrases: ["commercial flight operations", "instrument flight rules",
+                      "flight planning", "crew resource management"]
+      experience_text: "First Officer, regional carrier (6 years)"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "NO_OPPORTUNITY_FOUND"
+      jobs_absent: ["pb_truck_coach_grfn", "pb_front_desk_quality_inn",
+                    "pb_ops_manager_cygnus", "pb_auto_tech_northside",
+                    "pb_electrician_puc", "pb_admin_assistant_pt"]
+
+  # ==================================================================
+  # Caps and floors (F4 / F7 lineage + work-type)
+  # ==================================================================
+
+  - case_id: "c_exact_title_zero_skills"
+    expectation_status: "transcribed"      # F4, passes_today
+    description: >-
+      User types the exact Cygnus title with no skills and no
+      experience. Title-match override surfaces the posting; the
+      no-experience floor must STILL set its flag — the flag is the
+      honesty signal the responder narrates from.
+    categories: ["direct_title", "cap_semantics"]
+    profile:
+      target_role: "Senior Manager of Operations & Client Services"
+      skill_phrases: []
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_ops_manager_cygnus"
+          band: "stretch"
+          cap_reasons: ["band_capped_by_no_experience"]
+          matched_required: []
+
+  - case_id: "c_no_experience_floor"
+    expectation_status: "transcribed"      # F7, fails_today_fixed_by_v2
+    description: >-
+      High skill overlap but no experience_text. v2 caps at stretch —
+      skills without context don't prove fit. Asserts the explicit
+      flag so a floor that silently stops firing fails the suite.
+    categories: ["cap_semantics"]
+    profile:
+      target_role: "customer service representative"
+      skill_phrases: ["customer service", "phone communication",
+                      "computer systems", "communication", "payment processing"]
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_front_desk_quality_inn"
+          band: "stretch"
+          cap_reasons: ["band_capped_by_no_experience"]
+
+  - case_id: "c_work_type_mismatch_cap"
+    expectation_status: "authored"
+    description: >-
+      Full-time seeker vs part-time admin posting with real skill
+      overlap. The work-type gate must cap the band and record its
+      reason rather than silently down-scoring.
+    categories: ["work_type", "cap_semantics"]
+    profile:
+      target_role: "administrative assistant"
+      skill_phrases: ["scheduling", "document management",
+                      "customer service", "data entry"]
+      experience_text: "Office administrator, 4 years"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_admin_assistant_pt"
+          band: "stretch"
+          cap_reasons: ["band_capped_by_work_type_mismatch"]
+
+  # ==================================================================
+  # Honest-stretch and happy paths (F5 / cv_01 / cv_03 / cv_04 /
+  # meeting_01 / meeting_02 lineage)
+  # ==================================================================
+
+  - case_id: "c_cs_to_hotel_stretch"
+    expectation_status: "transcribed"      # F5, passes_today
+    description: >-
+      Generic CS rep vs hotel front desk. Honest stretch — has the CS
+      basics, missing the hotel-specific stack. Transferable skills
+      must not inflate the band.
+    categories: ["ready_to_apply", "cap_semantics"]
+    profile:
+      target_role: "customer service representative"
+      skill_phrases: ["customer service", "phone communication",
+                      "computer systems", "attention to detail",
+                      "communication", "payment processing",
+                      "multitasking", "conflict resolution"]
+      experience_text: "3 years retail customer service"
+      education_text: "Ontario Secondary School Diploma"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_front_desk_quality_inn"
+          band: "stretch"
+          matched_required:
+            - { requirement: "customer service",   via_stage: "exact", user_skill: "customer service" }
+            - { requirement: "payment processing", via_stage: "exact", user_skill: "payment processing" }
+          missing_required_contains: ["guest check-in"]
+
+  - case_id: "c_front_desk_full_coverage"
+    expectation_status: "authored"         # cv_04 archetype, upgraded
+    description: >-
+      Experienced hotel front-desk profile covering every required
+      skill on the Quality Inn posting. Expect band good-or-better
+      with empty required_missing -> READY_TO_APPLY. This is the
+      happy-path counterweight to c_cs_to_hotel_stretch: same posting,
+      the delta is exactly the hotel-specific stack.
+    categories: ["ready_to_apply"]
+    profile:
+      target_role: "front desk agent"
+      skill_phrases: ["guest check-in", "reservation management",
+                      "property management system", "customer service",
+                      "payment processing", "phone communication"]
+      experience_text: "Front Desk Agent, Delta Hotels (3 years)"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "READY_TO_APPLY"
+      jobs:
+        - posting_id: "pb_front_desk_quality_inn"
+          band: "good"          # floor assertion; strong also acceptable -> see band_at_least
+          band_at_least: true   # loader interprets band as a minimum for this case
+          cap_reasons: []
+          matched_required:
+            - { requirement: "guest check-in",             via_stage: "exact", user_skill: "guest check-in" }
+            - { requirement: "property management system", via_stage: "exact", user_skill: "property management system" }
+
+  - case_id: "c_310s_full_coverage"
+    expectation_status: "authored"         # meeting_01 "perfect" archetype
+    description: >-
+      Certified 310S tech with Class G and full skill coverage.
+      Credentialed happy path: both credentials matched exact, no
+      caps, READY_TO_APPLY.
+    categories: ["ready_to_apply", "credential_gap"]
+    profile:
+      target_role: "automotive service technician"
+      skill_phrases: ["automotive diagnostics", "brake system repair",
+                      "preventive maintenance",
+                      "310S certificate of qualification",
+                      "Class G driver's license",
+                      "electrical systems troubleshooting"]
+      experience_text: "Licensed Automotive Service Technician, 5 years"
+      education_text: "310S Certificate of Qualification"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "READY_TO_APPLY"
+      jobs:
+        - posting_id: "pb_auto_tech_northside"
+          band: "good"
+          band_at_least: true
+          cap_reasons: []
+          matched_required:
+            - { requirement: "310S certificate of qualification", via_stage: "exact", user_skill: "310S certificate of qualification" }
+            - { requirement: "class g driver's license",          via_stage: "exact", user_skill: "Class G driver's license" }
+
+  - case_id: "c_310s_weak_no_cert"
+    expectation_status: "authored"         # meeting_02 "weak" archetype
+    description: >-
+      Helper-level automotive experience, no 310S, no Class G claim.
+      Skill overlap exists but both credential gaps must surface and
+      the cap must fire.
+    categories: ["credential_gap"]
+    profile:
+      target_role: "automotive service technician"
+      skill_phrases: ["oil changes", "tire rotation", "brake system repair"]
+      experience_text: "Lube technician / shop helper, 18 months"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_auto_tech_northside"
+          band: "stretch"
+          cap_reasons: ["band_capped_by_credential"]
+          missing_required_contains: ["310s"]
+
+  - case_id: "c_electrician_journeyman"
+    expectation_status: "authored"         # cv_03 archetype
+    description: >-
+      309A journeyman with full required coverage on the PUC posting.
+      Regulated-trade happy path.
+    categories: ["ready_to_apply", "credential_gap"]
+    profile:
+      target_role: "electrician"
+      skill_phrases: ["electrical installation", "electrical code compliance",
+                      "309A certificate of qualification",
+                      "preventive maintenance", "blueprint reading"]
+      experience_text: "Journeyman Electrician, industrial maintenance (7 years)"
+      education_text: "309A Certificate of Qualification — Skilled Trades Ontario"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "READY_TO_APPLY"
+      jobs:
+        - posting_id: "pb_electrician_puc"
+          band: "good"
+          band_at_least: true
+          cap_reasons: []
+          matched_required:
+            - { requirement: "309A certificate of qualification", via_stage: "exact", user_skill: "309A certificate of qualification" }
+
+  # ==================================================================
+  # Semantic threshold pair (both sides of 0.70)
+  # ==================================================================
+
+  - case_id: "c_semantic_bridge_above_threshold"
+    expectation_status: "authored"
+    description: >-
+      "client intake coordination" bridges to the Cygnus posting's
+      "customer onboarding" at pinned cosine 0.74 (> 0.70 threshold).
+      Contract: the requirement matches via the semantic stage. M6's
+      alias loop should eventually promote this pair to exact — when
+      it does, via_stage here changes in the same PR, and that diff IS
+      the progress metric.
+    categories: ["semantic_bridge"]
+    profile:
+      target_role: "client services manager"
+      skill_phrases: ["client intake coordination", "team leadership",
+                      "operations planning", "budget management",
+                      "client relationship management"]
+      experience_text: "Client Services Team Lead (4 years)"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_ops_manager_cygnus"
+          band: "stretch"
+          band_at_least: true
+          matched_required:
+            - { requirement: "customer onboarding", via_stage: "semantic", user_skill: "client intake coordination" }
+
+  - case_id: "c_semantic_below_threshold"
+    expectation_status: "authored"
+    description: >-
+      Sibling of the bridge case: "front desk reception" vs "customer
+      onboarding" at pinned cosine 0.68 (< 0.70). The requirement must
+      land in required_missing — the threshold is a wall, not a slope.
+    categories: ["semantic_bridge", "fuzzy_boundary"]
+    profile:
+      target_role: "client services manager"
+      skill_phrases: ["front desk reception", "team leadership",
+                      "operations planning", "budget management",
+                      "client relationship management"]
+      experience_text: "Client Services Team Lead (4 years)"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_ops_manager_cygnus"
+          missing_required_contains: ["customer onboarding"]
+
+  # ==================================================================
+  # Thin evidence (F10 lineage, retargeted at diagnosis)
+  # ==================================================================
+
+  - case_id: "c_thin_evidence_undetermined"
+    expectation_status: "authored"
+    description: >-
+      Empty skills + vague target ("something"). F10 asserted "no
+      strong/good matches"; the corpus asserts the stronger, more
+      user-visible contract: enough_to_match is false, so diagnosis is
+      UNDETERMINED and no per-job outcome is claimed at all.
+    categories: ["thin_evidence", "no_match"]
+    profile:
+      target_role: "something"
+      skill_phrases: []
+    expect:
+      diagnosis: "UNDETERMINED"
