@@ -295,6 +295,162 @@ def test_refresh_derived_into_staged_preserves_skill_id():
 # ===========================================================================
 # 4. End-to-end wiring: derive -> merge -> user_ids populated
 # ===========================================================================
+# ===========================================================================
+# 5. Curated alias policy (2026-07-01)
+# ===========================================================================
+# These tests pin the curation decisions made at sign-off. The source
+# of truth is skillbridge/ingest/oasis_curated_aliases.CURATED_ALIASES
+# (Python code, git-tracked). The CSV at data/oasis_skills.csv stays
+# empty for aliases -- it's ETL output regenerated from official OaSIS
+# source files, and hand-edits there would be silently overwritten on
+# the next taxonomy refresh.
+#
+# Every alias claim below has hiring-manager judgment behind it. Removing
+# an alias here is a policy decision; adding one requires the same
+# discipline (category-1 only: deterministic tool -> competency or
+# synonym -> competency, no LLM judgment territory).
+def test_alias_policy_protected_rows_stay_empty():
+    """Decision Making, Evaluation, Time Management must have ZERO
+    aliases. Aliasing these would let the resolver claim a user has
+    those competencies without LLM/context judgment.
+
+    Time Management specifically is the safety pin against the
+    'accounts payable management' -> 'Time Management' false positive
+    caught during slice sign-off."""
+    from skillbridge.ingest.oasis_curated_aliases import CURATED_ALIASES
+    for sid, name in [
+        ("F.02.a.03", "Decision Making"),
+        ("F.02.b.01", "Evaluation"),
+        ("F.04.b.05", "Time Management"),
+    ]:
+        assert sid not in CURATED_ALIASES, (
+            f"{name} ({sid}) has curated aliases; must stay absent per "
+            "locked policy. See oasis_curated_aliases module docstring."
+        )
+
+
+def test_alias_policy_digital_literacy_covers_tools_but_not_google_docs():
+    """Digital Literacy carries the tool-heavy alias set. Word/Excel/
+    QuickBooks/Acrobat/Office/Outlook all map here (tools prove digital
+    tool use). google docs was explicitly DROPPED at sign-off to avoid
+    the Word/Writing ambiguity trap."""
+    from skillbridge.ingest.oasis_curated_aliases import CURATED_ALIASES
+    aliases = CURATED_ALIASES["F.01.c.02"]
+    for expected in [
+        "microsoft excel", "ms excel",
+        "microsoft word",
+        "microsoft office", "ms office",
+        "microsoft outlook",
+        "quickbooks", "quickbooks online", "quickbooks desktop",
+        "adobe acrobat",
+        "google workspace",
+        "computer literacy",
+    ]:
+        assert expected in aliases, (
+            f"Digital Literacy missing expected alias: {expected!r}"
+        )
+    assert "google docs" not in aliases, (
+        "'google docs' was dropped at sign-off (ambiguous with Writing)"
+    )
+
+
+def test_alias_policy_writing_covers_stated_writing_skills_not_tools():
+    """Writing carries the STATED-skill aliases (written communication,
+    business writing, report writing). Word/tools DO NOT map here --
+    they map to Digital Literacy. Prevents double-counting."""
+    from skillbridge.ingest.oasis_curated_aliases import CURATED_ALIASES
+    aliases = CURATED_ALIASES["F.01.b.02"]
+    for expected in [
+        "written communication", "business writing", "report writing",
+    ]:
+        assert expected in aliases
+    for tool in [
+        "microsoft word", "ms word", "google docs",
+    ]:
+        assert tool not in aliases, (
+            f"{tool!r} in Writing aliases would double-count with Digital "
+            "Literacy. Locked at sign-off: Word is a tool, proves digital "
+            "literacy, not writing quality."
+        )
+
+
+def test_alias_policy_persuading_drops_bare_influencing():
+    """Persuading has 'persuasion' and 'influencing others' (specific).
+    Bare 'influencing' was DROPPED at sign-off -- too broad; can read
+    as 'shaped strategy' or 'advised leadership' rather than convincing
+    someone to change behavior."""
+    from skillbridge.ingest.oasis_curated_aliases import CURATED_ALIASES
+    aliases = CURATED_ALIASES["F.05.a.04"]
+    assert "persuasion" in aliases
+    assert "influencing others" in aliases
+    assert "influencing" not in aliases, (
+        "Bare 'influencing' was dropped at sign-off -- too broad."
+    )
+
+
+def test_alias_policy_quality_control_testing_drops_quality_assurance():
+    """Quality Control Testing has 'quality control' and 'qc testing'.
+    'quality assurance' was DROPPED at sign-off -- QA is a broader
+    process/audit discipline; QCT is running the tests. Different
+    roles even inside the same department."""
+    from skillbridge.ingest.oasis_curated_aliases import CURATED_ALIASES
+    aliases = CURATED_ALIASES["F.03.a.08"]
+    assert "quality control" in aliases
+    assert "qc testing" in aliases
+    assert "quality assurance" not in aliases, (
+        "'quality assurance' was dropped at sign-off (broader than QCT)."
+    )
+
+
+def test_alias_policy_total_curated_rows_matches_signoff():
+    """Load-bearing curation pin: 19 competencies curated at sign-off.
+    If someone silently adds/removes a keyed row, this counter forces
+    a review + memo update."""
+    from skillbridge.ingest.oasis_curated_aliases import CURATED_ALIASES
+    assert len(CURATED_ALIASES) == 19, (
+        f"Curated row count changed to {len(CURATED_ALIASES)} (was 19 at "
+        "sign-off). Update this assertion AND the module docstring before "
+        "shipping."
+    )
+
+
+def test_alias_policy_all_aliases_are_lowercase_strings():
+    """The resolver compares lowercased. Any uppercase alias is a bug
+    (dead code that will never resolve)."""
+    from skillbridge.ingest.oasis_curated_aliases import CURATED_ALIASES
+    for sid, tup in CURATED_ALIASES.items():
+        assert isinstance(tup, tuple), (
+            f"{sid} aliases must be a tuple (immutable), got {type(tup).__name__}"
+        )
+        for alias in tup:
+            assert isinstance(alias, str) and alias == alias.lower(), (
+                f"{sid}: alias {alias!r} must be lowercase (resolver compares "
+                "lowercased -- non-lowercase entries would never resolve)."
+            )
+            assert alias.strip() == alias, (
+                f"{sid}: alias {alias!r} has leading/trailing whitespace."
+            )
+
+
+def test_alias_policy_no_duplicate_aliases_across_rows():
+    """Curation invariant: no resume phrase maps to more than one
+    competency. Otherwise a user typing that phrase would non-
+    deterministically resolve to one of them based on cache-iteration
+    order -- double-counting risk + ambiguous evidence."""
+    from skillbridge.ingest.oasis_curated_aliases import CURATED_ALIASES
+    seen: dict[str, str] = {}
+    for sid, tup in CURATED_ALIASES.items():
+        for alias in tup:
+            assert alias not in seen, (
+                f"Alias {alias!r} maps to both {seen[alias]} and {sid}. "
+                "Each resume phrase must have exactly one competency."
+            )
+            seen[alias] = sid
+
+
+# ===========================================================================
+# 6. End-to-end wiring: derive -> merge -> user_ids populated
+# ===========================================================================
 def test_end_to_end_resume_upload_populates_user_ids(monkeypatch):
     """Load-bearing integration test. Simulate a resume-facts payload
     with one OaSIS-matching skill + several concrete resume-vocab
