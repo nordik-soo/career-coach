@@ -245,6 +245,34 @@ _MARKET_DATA_UNAVAILABLE_CASES: frozenset[str] = frozenset({
 
 
 # ---------------------------------------------------------------------------
+# Step 6f (2026-07-02): case-level synthetic skill_adjacent_results.
+# ---------------------------------------------------------------------------
+# Cases that pin the SKILL_ADJACENT_AVAILABLE diagnosis branch need a
+# non-empty skill_adjacent_results list -- diagnose() only records
+# len() and truthiness, not the entries' shape, so a minimal synthetic
+# fixture is sufficient. Same rationale as _MARKET_DATA_UNAVAILABLE_
+# CASES above: injection lives in the runner, not the corpus schema,
+# until enough cases need per-case diagnosis-signal control to
+# justify a YAML field.
+_SKILL_ADJACENT_AVAILABLE_CASES: frozenset[str] = frozenset({
+    "c_skill_adjacent_available_pivot",
+})
+
+
+def _synthetic_skill_adjacent_results(case: Case) -> list[dict]:
+    """Small named fixture handed to diagnose() for cases in
+    _SKILL_ADJACENT_AVAILABLE_CASES. Content is arbitrary: diagnose()
+    only checks truthiness/len. Descriptive keys aid debugging."""
+    if case.case_id not in _SKILL_ADJACENT_AVAILABLE_CASES:
+        return []
+    return [{
+        "source": "synthetic_matching_eval_fixture",
+        "case_id": case.case_id,
+        "posting_ids": ["pb_electrician_puc", "pb_truck_coach_grfn"],
+    }]
+
+
+# ---------------------------------------------------------------------------
 # Step 6b (2026-07-02): target NOC derivation for diagnose() input.
 # ---------------------------------------------------------------------------
 # The Step 6a harness computed target_posting_count as the count of
@@ -385,7 +413,7 @@ def _run_engine_for_case(case: Case) -> RunOutcome:
             engine_completed=engine_completed,
             snapshot_usable=snapshot_usable,
             direct_match_results=matches,
-            skill_adjacent_results=[],
+            skill_adjacent_results=_synthetic_skill_adjacent_results(case),
             target_posting_count=target_posting_count,
         )
         outcome = dx.outcome
