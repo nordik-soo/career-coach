@@ -227,6 +227,51 @@ def _build_staged_profile(case: Case):
 
 
 # ---------------------------------------------------------------------------
+# Step 6b (2026-07-02): target NOC derivation for diagnose() input.
+# ---------------------------------------------------------------------------
+# The Step 6a harness computed target_posting_count as the count of
+# eligible surfaced matches. Wrong contract: diagnose() expects the
+# count of postings in the frozen bank whose noc_code == the user's
+# resolved target NOC. That miscount routed every case with any
+# eligible match into PREPARATION_GAP, masking negative-control
+# behaviour.
+#
+# Step 6b fix: derive target NOC from the corpus itself:
+#   1. If case.expect.jobs is non-empty, use the first expected
+#      posting's noc_code (corpus-grounded, no external guessing).
+#   2. If not, look up target_role in the small explicit map below.
+#   3. If not, return None -> target_posting_count = None.
+#
+# The explicit map is intentionally narrow -- only for no-job cases
+# where the role has a known real NOC in the taxonomy but the bank
+# has no matching posting (target_posting_count legitimately 0).
+# Vague / fabricated / off-topic roles stay unresolved.
+_NO_JOB_TARGET_NOC: dict[str, str] = {
+    "software developer": "21232",
+    "airline pilot": "72600",
+    "marine pilot": "72602",
+    "registered veterinary technician": "32104",
+    "welder": "72106",
+    "accounts payable clerk": "14200",
+    # Deliberately unmapped -> None -> target_posting_count=None:
+    #   "professional dinosaur trainer" (fabricated)
+    #   "something" (thin evidence, vague)
+    #   "something in warehousing" (vague)
+}
+
+
+def _target_noc_for_case(case: Case, corpus: Corpus) -> str | None:
+    """Derive target NOC for diagnose() input. Corpus-first."""
+    if case.expect.jobs:
+        first_pid = case.expect.jobs[0].posting_id
+        posting = corpus.posting_by_id(first_pid)
+        if posting is not None:
+            return posting.noc_code
+    role = (case.profile.target_role or "").strip().lower()
+    return _NO_JOB_TARGET_NOC.get(role)
+
+
+# ---------------------------------------------------------------------------
 # Runner: engine + diagnosis for one case
 # ---------------------------------------------------------------------------
 @dataclass
@@ -248,7 +293,10 @@ def _run_engine_for_case(case: Case) -> RunOutcome:
     except Exception as exc:  # noqa: BLE001
         return RunOutcome(engine_error=f"engine raised: {type(exc).__name__}: {exc}")
 
-    # Diagnosis inputs (heuristics for Step 6a; Step 6b may refine):
+    # Diagnosis inputs. Step 6b fixed target_posting_count only; the
+    # other heuristics (enough_to_match, usable_evidence_present,
+    # snapshot_usable, skill_adjacent_results) stay naive here.
+    # Subsequent Step 6c/6d etc. investigate remaining disagreements.
     enough_to_match = bool(case.profile.skill_phrases) and bool(
         (case.profile.target_role or "").strip()
     )
@@ -256,10 +304,15 @@ def _run_engine_for_case(case: Case) -> RunOutcome:
         case.profile.experience_text
     )
     engine_completed = True
-    snapshot_usable = True  # 6a always supplies the frozen bank
-    target_posting_count: int | None = sum(
-        1 for m in matches if m.match_eligible
-    )
+    snapshot_usable = True  # not yet parameterized by case
+
+    target_noc = _target_noc_for_case(case, _CORPUS)
+    if target_noc is None:
+        target_posting_count: int | None = None
+    else:
+        target_posting_count = sum(
+            1 for p in _CORPUS.posting_bank if p.noc_code == target_noc
+        )
 
     try:
         dx = diagnose(
