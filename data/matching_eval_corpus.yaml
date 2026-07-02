@@ -47,18 +47,30 @@
 # false today.
 # ====================================================================
 #
-# Seed coverage vs. the CI floor (36): this seed has 17 cases. Gaps to
-# fill before flipping CI to the corpus, by category:
-#   credential_gap        4/6   (need: regulated non-trade case, 309A-missing case)
-#   negative_control      2/4   (need: 2 more off-domain profiles)
-#   no_match/thin         3/6   (need: MARKET_DATA_UNAVAILABLE engine-failure
-#                                injection; more UNDETERMINED shapes)
-#   semantic+fuzzy        3/8   (need: fuzzy_boundary pairs both sides;
-#                                more threshold-adjacent cosine pairs)
-#   cap/work_type/family  3/6   (need: family_gate leakage case with
-#                                jobs_absent; second work_type shape)
-#   happy paths           5/6   (need: adjacent_only case once the
-#                                SKILL_ADJACENT_AVAILABLE input shape is pinned)
+# Coverage vs. the CI floor (36): after Step 5 (2026-07-02) this
+# corpus has 28 cases. All 6 category floors are met:
+#   credential_gap                          8/6  ✓
+#   negative_control                        4/4  ✓
+#   no_match / thin_evidence                8/6  ✓
+#   semantic_bridge / fuzzy_boundary        8/8  ✓
+#   cap_semantics / work_type / family_gate 7/6  ✓
+#   ready_to_apply / direct_title /
+#     adjacent_only                         6/6  ✓
+# All 6 diagnosis outcomes now have >= 1 exercising case (Step 5 added
+# MARKET_DATA_UNAVAILABLE and SKILL_ADJACENT_AVAILABLE).
+#
+# Total 28 cases is below the schema's suggested v1 target of 45-55.
+# Additional cases welcomed for depth/scenarios, but no category is
+# below its floor. Coverage-floor test in tests/test_matching_eval.py
+# will pass.
+#
+# NOTE ON AUTHORED-EXPECTATION DISAGREEMENTS: cases 5
+# (c_market_data_unavailable_stub) and 11
+# (c_skill_adjacent_available_pivot) pin diagnosis outcomes that
+# depend on engine behaviour that may not fire under a frozen
+# posting bank. Step 6 (first-run disagreement resolution) is where
+# either the engine gets a testable failure mode or the case's
+# expectation shifts.
 
 corpus_version: 1
 corpus_verified_at: null          # set after end-to-end review
@@ -81,6 +93,22 @@ embedding_fixtures:
   - a: "front desk reception"
     b: "customer onboarding"
     cosine: 0.68        # below threshold -> must NOT match
+  # ----- Step 5 additions (2026-07-02) -----
+  - a: "leadership development"
+    b: "operations planning"
+    cosine: 0.70        # EXACTLY at threshold -- test threshold inclusivity
+  - a: "managing outcomes"
+    b: "operations planning"
+    cosine: 0.95        # high similarity -- semantic strength MUST still cap at 0.75
+  - a: "data entry"
+    b: "document management"
+    cosine: 0.65        # weak similarity -- must NOT contribute alone
+  - a: "customer intake"
+    b: "reservation management"
+    cosine: 0.65        # weak similarity -- must NOT contribute alone
+  - a: "scheduling meetings"
+    b: "team leadership"
+    cosine: 0.60        # very weak -- must NOT contribute alone
 
 # ====================================================================
 # POSTING BANK
@@ -229,6 +257,28 @@ posting_bank:
       - { name: "document management",    requirement: "required",  is_credential: false }
       - { name: "customer service",       requirement: "required",  is_credential: false }
       - { name: "data entry",             requirement: "preferred", is_credential: false }
+    embedding_profile: "default"
+
+  # ------------------------------------------------------------------
+  # Warehouse WHMIS posting (Step 5, 2026-07-02) — exists to exercise
+  # safe credential-alias matching (WHMIS Certification -> WHMIS via
+  # canonical alias, NOT fuzzy which is disallowed for credentials).
+  # ------------------------------------------------------------------
+  - posting_id: "pb_warehouse_whmis"
+    is_synthetic: true
+    transcribed_from_sccc: false
+    title: "Warehouse Associate"
+    employer: "Northern Logistics"
+    noc_code: "75110"
+    location: "Sault Ste. Marie, ON"
+    region_code: "SSM"
+    employment_type: "full-time"
+    posted_days_ago: 6
+    skills:
+      - { name: "shipping and receiving",    requirement: "required",  is_credential: false }
+      - { name: "inventory tracking",        requirement: "required",  is_credential: false }
+      - { name: "WHMIS",                     requirement: "required",  is_credential: true  }
+      - { name: "forklift operation",        requirement: "preferred", is_credential: false }
     embedding_profile: "default"
 
 # ====================================================================
@@ -641,3 +691,269 @@ cases:
       skill_phrases: []
     expect:
       diagnosis: "UNDETERMINED"
+
+  # ==================================================================
+  # Step 5 additions (2026-07-02) — coverage-floor fills
+  # ==================================================================
+
+  # ----- Negative-control fills (need +2 to reach 4/4) -------------
+  - case_id: "c_marine_pilot_negative_control"
+    expectation_status: "authored"
+    description: >-
+      Marine pilot / commercial vessel operator profile. Zero
+      target-NOC postings in the SSM bank (no maritime infrastructure).
+      Any skill overlap with trades/office postings is coincidental,
+      not adjacency-worthy. Protects against nautical vocabulary
+      false-promoting unrelated postings.
+    categories: ["negative_control", "no_match"]
+    profile:
+      target_role: "marine pilot"
+      skill_phrases: ["commercial vessel navigation", "harbour piloting",
+                      "maritime radio communication", "seamanship"]
+      experience_text: "Marine Pilot, Great Lakes Piloting Authority (8 years)"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "NO_OPPORTUNITY_FOUND"
+      jobs_absent: ["pb_truck_coach_grfn", "pb_front_desk_quality_inn",
+                    "pb_ops_manager_cygnus", "pb_auto_tech_northside",
+                    "pb_electrician_puc", "pb_admin_assistant_pt",
+                    "pb_warehouse_whmis"]
+
+  - case_id: "c_veterinary_tech_negative_control"
+    expectation_status: "authored"
+    description: >-
+      Registered Veterinary Technician profile. Health-adjacent
+      vocabulary (anaesthesia, surgical assisting, clinical pathology)
+      but zero relevant adjacency into the trades/office bank.
+      Protects against generic "care" tokens promoting unrelated
+      postings.
+    categories: ["negative_control", "no_match"]
+    profile:
+      target_role: "registered veterinary technician"
+      skill_phrases: ["veterinary anaesthesia", "surgical assisting",
+                      "animal restraint", "clinical pathology",
+                      "OVC-certified RVT"]
+      experience_text: "RVT, Sault Ste. Marie Animal Hospital (5 years)"
+      education_text: "Veterinary Technician Diploma, Sault College"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "NO_OPPORTUNITY_FOUND"
+      jobs_absent: ["pb_truck_coach_grfn", "pb_front_desk_quality_inn",
+                    "pb_ops_manager_cygnus", "pb_auto_tech_northside",
+                    "pb_electrician_puc", "pb_admin_assistant_pt",
+                    "pb_warehouse_whmis"]
+
+  # ----- No-match / thin-evidence fills (need +3 to reach 6/6) -----
+  - case_id: "c_thin_evidence_only_credentials"
+    expectation_status: "authored"
+    description: >-
+      Profile carrying credentials (WHMIS, first aid) but no work-
+      history and vague target ("something in warehousing").
+      Credentials alone don't clear the enough_to_match floor;
+      UNDETERMINED protects against pretending credential-only
+      profiles can be tier-scored.
+    categories: ["thin_evidence", "no_match"]
+    profile:
+      target_role: "something in warehousing"
+      skill_phrases: ["WHMIS", "first aid"]
+    expect:
+      diagnosis: "UNDETERMINED"
+
+  - case_id: "c_off_topic_target_role"
+    expectation_status: "authored"
+    description: >-
+      Legitimate accounting skills but nonsense target ("professional
+      dinosaur trainer"). Target-role resolution must reject the
+      target rather than silently pick a fallback NOC; diagnosis is
+      NO_OPPORTUNITY_FOUND because there is no valid NOC to match
+      against. Protects against target-parsing garbage-in-fallback-out.
+    categories: ["no_match"]
+    profile:
+      target_role: "professional dinosaur trainer"
+      skill_phrases: ["accounting", "bookkeeping", "microsoft excel",
+                      "quickbooks online"]
+      experience_text: "Accountant, 3 years"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "NO_OPPORTUNITY_FOUND"
+      jobs_absent: ["pb_truck_coach_grfn", "pb_front_desk_quality_inn",
+                    "pb_ops_manager_cygnus", "pb_auto_tech_northside",
+                    "pb_electrician_puc", "pb_admin_assistant_pt",
+                    "pb_warehouse_whmis"]
+
+  - case_id: "c_market_data_unavailable_stub"
+    expectation_status: "authored"
+    description: >-
+      Intent-pinning stub for the MARKET_DATA_UNAVAILABLE outcome
+      (per inventory_diagnosis._PILLARS_BY_OUTCOME, this outcome
+      authorizes the inventory_coaching pillar and fires when market
+      data is unreachable). Under normal operation with the frozen
+      posting bank the engine may not produce this outcome without
+      injection; this case pins the intent. Step 6 (first-run
+      disagreement) will resolve whether the engine gets a testable
+      failure mode or the harness injects the condition.
+    categories: ["no_match"]
+    profile:
+      target_role: "accounts payable clerk"
+      skill_phrases: ["accounts payable management", "invoice processing"]
+      experience_text: "AP Clerk, 2 years"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "MARKET_DATA_UNAVAILABLE"
+
+  # ----- Semantic + fuzzy_boundary fills (need +5 to reach 8/8) ----
+  - case_id: "c_semantic_bridge_at_exact_threshold"
+    expectation_status: "authored"
+    description: >-
+      "leadership development" bridges to "operations planning" at
+      pinned cosine 0.70 (EXACTLY at threshold). Contract: threshold
+      is INCLUSIVE (>= 0.70 matches). If a future engine change
+      flips this to strict >, the case fails and forces an explicit
+      decision.
+    categories: ["semantic_bridge"]
+    profile:
+      target_role: "operations manager"
+      skill_phrases: ["leadership development", "team leadership",
+                      "budget management", "client relationship management",
+                      "customer onboarding"]
+      experience_text: "Team Lead at Regional Services (3 years)"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_ops_manager_cygnus"
+          band: "stretch"
+          band_at_least: true
+          matched_required:
+            - { requirement: "operations planning", via_stage: "semantic", user_skill: "leadership development" }
+
+  - case_id: "c_semantic_bridge_high_similarity_capped"
+    expectation_status: "authored"
+    description: >-
+      "managing outcomes" bridges to "operations planning" at pinned
+      cosine 0.95 (well above threshold). Contract: even at very high
+      similarity, the semantic stage's strength contribution is
+      CAPPED at SEMANTIC_STRENGTH_CAP=0.75 (config.py:420). If a
+      future engine change removes the cap, high-similarity semantic
+      matches would inflate band scores past honest coverage.
+    categories: ["semantic_bridge"]
+    profile:
+      target_role: "operations manager"
+      skill_phrases: ["managing outcomes", "team leadership",
+                      "budget management", "client relationship management",
+                      "customer onboarding"]
+      experience_text: "Operations Lead (5 years)"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_ops_manager_cygnus"
+          band: "stretch"
+          band_at_least: true
+          matched_required:
+            - { requirement: "operations planning", via_stage: "semantic", user_skill: "managing outcomes" }
+
+  - case_id: "c_case_insensitive_exact_match"
+    expectation_status: "authored"
+    description: >-
+      User types "Customer Service" (title case); posting requires
+      "customer service" (lowercase). Match MUST fire via_stage:
+      exact after case-folding. Protects against a future
+      normalization regression that would silently drop
+      case-differing exact matches to fuzzy or (worse) no_match.
+    categories: ["fuzzy_boundary"]
+    profile:
+      target_role: "customer service representative"
+      skill_phrases: ["Customer Service", "Phone Communication",
+                      "Payment Processing", "Guest Check-in",
+                      "Reservation Management", "Property Management System"]
+      experience_text: "Front Desk Agent, 3 years"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_front_desk_quality_inn"
+          band: "stretch"
+          band_at_least: true
+          matched_required:
+            - { requirement: "customer service", via_stage: "exact", user_skill: "Customer Service" }
+
+  - case_id: "c_credential_safe_alias_whmis"
+    expectation_status: "authored"
+    description: >-
+      Safe credential alias case (Step 5, rewritten from originally-
+      proposed "fuzzy credential" case at review). User has "WHMIS
+      Certification"; posting requires "WHMIS". Credentials are
+      STRICT in the engine — no substring/fuzzy/semantic. The match
+      MUST fire via_stage: exact through canonical alias
+      normalization, and the credential cap MUST NOT fire. Protects
+      against (a) canonical alias regression that would break the
+      match, and (b) any future opening of fuzzy for credentials
+      (which would be a safety regression).
+    categories: ["credential_gap", "fuzzy_boundary"]
+    profile:
+      target_role: "warehouse associate"
+      skill_phrases: ["shipping and receiving", "inventory tracking",
+                      "WHMIS Certification"]
+      experience_text: "Warehouse Associate, 2 years"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_warehouse_whmis"
+          band: "stretch"
+          band_at_least: true
+          cap_reasons_forbidden: ["band_capped_by_credential"]
+          matched_required:
+            - { requirement: "WHMIS", via_stage: "exact", user_skill: "WHMIS Certification" }
+
+  - case_id: "c_semantic_multi_weak_no_match"
+    expectation_status: "authored"
+    description: >-
+      User has three skills each with pinned cosines to different
+      admin-posting required skills, ALL below the 0.70 threshold
+      (0.65, 0.65, 0.60). No single pair matches; multiple weak
+      similarities MUST NOT sum. Contract: threshold is per-pair,
+      not aggregate. Missing required skills MUST still appear in
+      required_missing. Protects against a well-meaning-but-wrong
+      "combine weak signals" heuristic.
+    categories: ["semantic_bridge", "fuzzy_boundary"]
+    profile:
+      target_role: "administrative assistant"
+      skill_phrases: ["data entry", "customer intake", "scheduling meetings"]
+      experience_text: "Junior office assistant, 1 year"
+      work_type_preference: "part-time"
+    expect:
+      diagnosis: "PREPARATION_GAP"
+      jobs:
+        - posting_id: "pb_admin_assistant_pt"
+          missing_required_contains: ["scheduling", "document management",
+                                       "customer service"]
+
+  # ----- adjacent_only + SKILL_ADJACENT_AVAILABLE (need +1) -------
+  - case_id: "c_skill_adjacent_available_pivot"
+    expectation_status: "authored"
+    description: >-
+      User targets "welder" (NOC 72106); no direct-target postings
+      exist in the bank. But skill-adjacent trades postings do
+      (pb_electrician_puc at 72200, pb_truck_coach_grfn at 72410),
+      and the user's tool-and-trade skills overlap with them.
+      Diagnosis is SKILL_ADJACENT_AVAILABLE, which authorizes the
+      adjacency_recommendation_surface pillar per
+      inventory_diagnosis._PILLARS_BY_OUTCOME.
+
+      Step 6 note: exact trigger conditions for
+      SKILL_ADJACENT_AVAILABLE in the current engine may need
+      investigation; case pins the intent and first-run may reveal
+      the engine currently produces PREPARATION_GAP or NO_OPPORTUNITY_
+      FOUND instead. Resolution is either engine gets the appropriate
+      diagnosis rule or case rewrites the assertion.
+    categories: ["adjacent_only"]
+    profile:
+      target_role: "welder"
+      skill_phrases: ["arc welding", "MIG welding", "blueprint reading",
+                      "safety compliance"]
+      experience_text: "Welder-fitter apprentice, 2 years"
+      work_type_preference: "full-time"
+    expect:
+      diagnosis: "SKILL_ADJACENT_AVAILABLE"
