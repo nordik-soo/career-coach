@@ -51,6 +51,10 @@ from skillbridge.chat.arbiter import (
     resolve_match_outcome,
     validate_planner_intent,
 )
+from skillbridge.chat.frame_telemetry import (
+    emit_frame_telemetry,
+    snapshot_pending_flags,
+)
 from skillbridge.chat.message_understanding import understand_message
 from skillbridge.chat.planner import plan_next_move
 from skillbridge.chat.routing import route_from_understanding
@@ -634,6 +638,12 @@ def _dispatch_recommender_consume(
         staged.pending_recommender_offer = None
         return None
 
+    # Step 1.4 (2026-07-03): capture pending state at function entry
+    # for frame telemetry. Snapshot AFTER the mode-validity guard so
+    # `pending_before` reflects a well-formed state; the guard's clear
+    # is a defensive path, not a normal consume turn.
+    _tele_pending_before = snapshot_pending_flags(staged)
+
     # Slice 5 (2026-06-29): adjacent_role_drilldown_select pending
     # state has its OWN consume flow -- resolver first, consent
     # second -- not the standard yes/no/other branch below. Dispatch
@@ -660,6 +670,11 @@ def _dispatch_recommender_consume(
         staged.last_adjacent_nocs = ()
         staged.touch()
         new_session_id = store.save(staged)
+        emit_frame_telemetry(
+            staged=staged,
+            path="consume_no",
+            pending_before=_tele_pending_before,
+        )
         return {
             "reply": (
                 "Got it -- happy to help if you change your mind. "
@@ -786,6 +801,11 @@ def _dispatch_recommender_consume(
         staged.last_adjacent_nocs = ()
         staged.touch()
         new_session_id = store.save(staged)
+        emit_frame_telemetry(
+            staged=staged,
+            path="consume_yes_empty_layerc",
+            pending_before=_tele_pending_before,
+        )
         return {
             "reply": reply,
             "profile_id": None,
@@ -810,6 +830,11 @@ def _dispatch_recommender_consume(
         staged.last_adjacent_nocs = ()
         staged.touch()
         new_session_id = store.save(staged)
+        emit_frame_telemetry(
+            staged=staged,
+            path="consume_yes_empty_layera",
+            pending_before=_tele_pending_before,
+        )
         return {
             "reply": reply,
             "profile_id": None,
@@ -862,6 +887,11 @@ def _dispatch_recommender_consume(
             staged.last_adjacent_nocs = ()
     staged.touch()
     new_session_id = store.save(staged)
+    emit_frame_telemetry(
+        staged=staged,
+        path="consume_yes_dispatch",
+        pending_before=_tele_pending_before,
+    )
     return {
         "reply": reply,
         "profile_id": None,
@@ -948,9 +978,17 @@ def _consume_drilldown_selection(
     from skillbridge.chat.recommender_assembly import (
         resolve_drilldown_selection,
     )
+    # Step 1.4 (2026-07-03): capture pending state at function entry
+    # for frame telemetry.
+    _tele_pending_before = snapshot_pending_flags(staged)
     surface = staged.last_recommender_adjacent_surface or ()
     selected = resolve_drilldown_selection(user_message, surface)
     if selected is not None:
+        emit_frame_telemetry(
+            staged=staged,
+            path="drilldown_resolver_hit",
+            pending_before=_tele_pending_before,
+        )
         return _dispatch_role_drilldown(
             staged=staged,
             noc_code=selected["noc_code"],
@@ -976,6 +1014,11 @@ def _consume_drilldown_selection(
         staged.last_recommender_adjacent_surface_at_turn = None
         staged.touch()
         new_session_id = store.save(staged)
+        emit_frame_telemetry(
+            staged=staged,
+            path="drilldown_no",
+            pending_before=_tele_pending_before,
+        )
         return {
             "reply": (
                 "Got it -- let me know if you want to revisit those "
@@ -1000,6 +1043,11 @@ def _consume_drilldown_selection(
         reply = render_role_drilldown_reprompt(surface)
         staged.touch()
         new_session_id = store.save(staged)
+        emit_frame_telemetry(
+            staged=staged,
+            path="drilldown_yes_reprompt",
+            pending_before=_tele_pending_before,
+        )
         return {
             "reply": reply,
             "profile_id": None,
@@ -1664,6 +1712,11 @@ def _maybe_route_recommender_from_intent(
         log.exception("recommender_routing import_failed; falling through")
         return None
 
+    # Step 1.4 (2026-07-03): capture pending state at function entry
+    # for frame telemetry. Snapshot BEFORE any router-side mutation
+    # (deferred_intent consume, target_noc resolution, pivot-clear).
+    _tele_pending_before = snapshot_pending_flags(staged)
+
     try:
         pattern_intent = _classify_intent(message)
         # Slice 1 (2026-06-23): thread last_asked_slot[0] as the
@@ -1778,11 +1831,21 @@ def _maybe_route_recommender_from_intent(
     if verdict.action == "out_of_scope_canned":
         # No slot is being asked -- system is redirecting. Don't
         # pollute last_asked_slots with a target/skills hint.
-        return _emit_canned_response(
+        result = _emit_canned_response(
             staged=staged, store=store,
             reply=_OUT_OF_SCOPE_CANNED, resume_info=None,
             asked_slot=None,
         )
+        emit_frame_telemetry(
+            staged=staged,
+            path="route_out_of_scope",
+            pending_before=_tele_pending_before,
+            pattern_intent=pattern_intent,
+            career_intent=career_intent,
+            router_action=verdict.action,
+            router_reason=verdict.reason,
+        )
+        return result
 
     if verdict.action == "ask_substrate":
         # Slice 1 follow-up (2026-06-23): the ask carries an
@@ -1811,11 +1874,21 @@ def _maybe_route_recommender_from_intent(
             and verdict.deferred_intent in _DEFERRABLE_CAREER_INTENTS
         ):
             staged.deferred_career_intent = verdict.deferred_intent
-        return _emit_canned_response(
+        result = _emit_canned_response(
             staged=staged, store=store,
             reply=reply, resume_info=None,
             asked_slot=asked_slot,
         )
+        emit_frame_telemetry(
+            staged=staged,
+            path="route_ask_substrate",
+            pending_before=_tele_pending_before,
+            pattern_intent=pattern_intent,
+            career_intent=career_intent,
+            router_action=verdict.action,
+            router_reason=verdict.reason,
+        )
+        return result
 
     if verdict.action == "recommender_layer":
         if verdict.recommender_mode is None:
@@ -1824,6 +1897,15 @@ def _maybe_route_recommender_from_intent(
                 "recommender_mode; falling through",
             )
             return None
+        emit_frame_telemetry(
+            staged=staged,
+            path="route_recommender_layer",
+            pending_before=_tele_pending_before,
+            pattern_intent=pattern_intent,
+            career_intent=career_intent,
+            router_action=verdict.action,
+            router_reason=verdict.reason,
+        )
         return _dispatch_recommender_from_intent(
             staged=staged,
             mode=verdict.recommender_mode,
