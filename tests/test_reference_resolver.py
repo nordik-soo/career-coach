@@ -22,6 +22,7 @@ import pytest
 from skillbridge.chat.conversation_frame import SurfaceItem
 from skillbridge.chat.reference_resolver import (
     ResolveOutcome,
+    build_clarification_prompt,
     resolve_reference,
 )
 
@@ -285,3 +286,111 @@ class TestMalformedSurfaceEntries:
         out = resolve_reference("the second", items)
         assert out.status == "resolved"
         assert out.item.label == "Accounting clerk"
+
+
+# ---------------------------------------------------------------- clarification prompt
+
+
+class TestClarificationPromptRendering:
+    """Locked shape (Step 2.2, 2026-07-03):
+      - Em dash (U+2014) between lead-in and list.
+      - Oxford comma before the final 'or' for 3+ item lists.
+      - 2-item list uses plain 'A or B' (no serial comma).
+      - Blank labels filtered defensively.
+    """
+
+    def test_two_items_uses_or_without_serial_comma(self):
+        prompt = build_clarification_prompt(_TWO_ROLES)
+        assert prompt == (
+            "Which one do you mean — "
+            "Administrative assistant or Accounting clerk?"
+        )
+
+    def test_three_items_uses_oxford_comma_before_final_or(self):
+        prompt = build_clarification_prompt(_THREE_ROLES)
+        assert prompt == (
+            "Which one do you mean — "
+            "Administrative assistant, "
+            "Accounting clerk, "
+            "or Data entry clerk?"
+        )
+
+    def test_four_items_uses_oxford_comma(self):
+        items = _THREE_ROLES + (_role("Bookkeeper", "12200", 4),)
+        prompt = build_clarification_prompt(items)
+        assert prompt == (
+            "Which one do you mean — "
+            "Administrative assistant, "
+            "Accounting clerk, "
+            "Data entry clerk, "
+            "or Bookkeeper?"
+        )
+
+    def test_em_dash_is_unicode_u2014(self):
+        prompt = build_clarification_prompt(_TWO_ROLES)
+        assert "—" in prompt   # em dash
+        assert " - " not in prompt  # not a plain hyphen with spaces
+        assert "--" not in prompt   # not a double hyphen
+
+    def test_blank_labels_filtered_defensively(self):
+        items = (
+            _role("Administrative assistant", "13110", 1),
+            _role("", "14200", 2),
+            _role("   ", "14400", 3),  # whitespace-only
+            _role("Data entry clerk", "14500", 4),
+        )
+        prompt = build_clarification_prompt(items)
+        # Only two labels remained after filtering; uses plain "or"
+        # form since 2 usable labels.
+        assert prompt == (
+            "Which one do you mean — "
+            "Administrative assistant or Data entry clerk?"
+        )
+
+    def test_single_item_after_filter_returns_empty(self):
+        """The resolver never emits clarification with < 2 items, so
+        this is defensive. Return empty string so a caller can treat
+        it as 'nothing to ask; fall through'."""
+        items = (
+            _role("Administrative assistant", "13110", 1),
+            _role("", "14200", 2),
+        )
+        assert build_clarification_prompt(items) == ""
+
+    def test_all_blank_items_returns_empty(self):
+        items = (
+            _role("", "13110", 1),
+            _role("  ", "14200", 2),
+        )
+        assert build_clarification_prompt(items) == ""
+
+    def test_empty_input_returns_empty(self):
+        assert build_clarification_prompt(()) == ""
+
+    def test_labels_are_preserved_verbatim(self):
+        """No lowercasing / no title-casing / no rewording. Coach
+        voice already lives upstream; this helper only formats."""
+        items = (
+            _role("ADMIN. ASST.", "13110", 1),
+            _role("Data-entry clerk (I)", "14400", 2),
+        )
+        prompt = build_clarification_prompt(items)
+        assert "ADMIN. ASST." in prompt
+        assert "Data-entry clerk (I)" in prompt
+
+    def test_prompt_ends_with_question_mark(self):
+        assert build_clarification_prompt(_TWO_ROLES).endswith("?")
+        assert build_clarification_prompt(_THREE_ROLES).endswith("?")
+
+    def test_job_kind_items_render_the_same(self):
+        """Rendering is kind-agnostic. Job-kind clarification is
+        deferred from a product-behavior standpoint (Step 2.5), but
+        the formatter itself doesn't discriminate."""
+        jobs = (
+            _job("Truck driver", "j1", 1),
+            _job("Delivery driver", "j2", 2),
+        )
+        prompt = build_clarification_prompt(jobs)
+        assert prompt == (
+            "Which one do you mean — Truck driver or Delivery driver?"
+        )

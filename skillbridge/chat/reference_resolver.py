@@ -233,3 +233,54 @@ def resolve_reference(
     return ResolveOutcome(
         status="no_reference", item=None, reason="no_signal",
     )
+
+
+# ---------------------------------------------------------------- clarification
+
+
+# Em dash character (U+2014). Locked with lead 2026-07-03 as the
+# delimiter between the lead-in and the item list.
+_EM_DASH = "—"
+
+# Prompt lead-in. Kept short; the coach voice elaborates upstream if
+# it wants. Downstream copy tests grep on this constant so a rename
+# is a deliberate act.
+_CLARIFICATION_LEAD = "Which one do you mean"
+
+
+def build_clarification_prompt(
+    items: tuple[SurfaceItem, ...],
+) -> str:
+    """Render a natural-language clarification prompt when the
+    reference resolver returned status="clarification".
+
+    Locked rendering (Step 2.2, 2026-07-03):
+      - Em dash (U+2014) separator between the lead-in and the list.
+      - Oxford comma before the final "or" for lists of 3+.
+      - 2-item list uses plain "A or B" (no serial comma).
+      - Blank labels are filtered defensively (a malformed surface
+        entry should not produce " , or Foo").
+      - Fewer than 2 usable labels after filtering returns an empty
+        string. The resolver never emits "clarification" with fewer
+        than 2 items, so this is a defensive short-circuit -- caller
+        can treat empty as "nothing to ask; fall through".
+
+    The prompt does NOT include a question mark inside the option
+    list; the trailing "?" applies to the whole sentence.
+    """
+    labels: list[str] = []
+    for it in items:
+        label = (it.label or "").strip()
+        if label:
+            labels.append(label)
+
+    if len(labels) < 2:
+        return ""
+
+    if len(labels) == 2:
+        listing = f"{labels[0]} or {labels[1]}"
+    else:
+        # 3+ items: Oxford comma before the terminal "or".
+        listing = ", ".join(labels[:-1]) + f", or {labels[-1]}"
+
+    return f"{_CLARIFICATION_LEAD} {_EM_DASH} {listing}?"
