@@ -1578,6 +1578,63 @@ def _dispatch_recommender_from_intent(
     }
 
 
+def _clear_recommender_state_on_pivot(
+    staged: StagedProfile,
+    verdict: "RecommenderRouteVerdict",
+) -> tuple[str, ...]:
+    """Step 1.3 (2026-07-03): aggressive clear-on-pivot.
+
+    When the router picks a path other than the recommender chain step
+    the user was on, clear the pending recommender offer + the adjacent
+    surface + its anchor so a subsequent confirming reply cannot hijack
+    the stale offer.
+
+    Pivot verdicts (all trigger clear):
+      - matching_engine  -- user wants matches
+      - out_of_scope_canned -- explicit OOS request
+      - recommender_layer with recommender_mode != pending_recommender_offer
+        -- user switched to a different recommender chain step (mode switch)
+
+    Non-pivot verdicts (never clear):
+      - recommender_layer with same mode -- chain continuation
+      - ask_substrate -- user didn't reject, just missing info; the
+        original pending state should still fire when substrate fills
+      - default -- message unclear; not an explicit new direction
+
+    Returns a tuple of cleared field names for telemetry logging. Empty
+    tuple means no clear happened -- either not a pivot, or nothing was
+    live to clear.
+
+    Deliberately NARROW to state the router path actually protects.
+    `pending_adjacent_search_offer` is not touched here because it is
+    unconditionally consumed at handler entry (Pattern 2 consume hook
+    at handle_anonymous line ~5594), so a router-level clear would be
+    dead code. Slice-1 follow-up tracks the separate question of
+    whether the Pattern 2 consume site can itself swallow explicit
+    pivot phrasings.
+    """
+    is_pivot = (
+        verdict.action in ("matching_engine", "out_of_scope_canned")
+        or (
+            verdict.action == "recommender_layer"
+            and verdict.recommender_mode is not None
+            and staged.pending_recommender_offer is not None
+            and verdict.recommender_mode != staged.pending_recommender_offer
+        )
+    )
+    if not is_pivot:
+        return ()
+    cleared: list[str] = []
+    if staged.pending_recommender_offer is not None:
+        staged.pending_recommender_offer = None
+        cleared.append("pending_recommender_offer")
+    if staged.last_recommender_adjacent_surface:
+        staged.last_recommender_adjacent_surface = ()
+        staged.last_recommender_adjacent_surface_at_turn = None
+        cleared.append("last_recommender_adjacent_surface")
+    return tuple(cleared)
+
+
 def _maybe_route_recommender_from_intent(
     *,
     staged: StagedProfile,
@@ -1703,6 +1760,17 @@ def _maybe_route_recommender_from_intent(
         staged.session_id[:8], pattern_intent, career_intent,
         verdict.action, verdict.reason,
     )
+
+    # Step 1.3 (2026-07-03): aggressive clear-on-pivot. Runs BEFORE
+    # the branch dispatch so any downstream reader sees cleared state.
+    # See _clear_recommender_state_on_pivot for the pivot definition.
+    _pivot_cleared = _clear_recommender_state_on_pivot(staged, verdict)
+    if _pivot_cleared:
+        log.info(
+            "recommender_routing session=%s pivot_cleared=%s action=%s",
+            staged.session_id[:8], ",".join(_pivot_cleared),
+            verdict.action,
+        )
 
     if verdict.action in ("matching_engine", "default"):
         return None  # let existing flow handle
