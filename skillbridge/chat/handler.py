@@ -491,9 +491,79 @@ def _blank_direct_tiers_for_pattern_2(tier_evidence):
     )
 
 
+# Pivot-intent detectors (slice 1 follow-up, 2026-07-03).
+#
+# Detect messages that name an EXPLICIT engine-level intent alongside
+# any yes/no signal. `_classify_intent` classifies the whole message
+# as one intent, so "yes, but show me jobs" classifies as
+# impatient_proceed → the pattern-2 classifier returned "yes" and the
+# downstream blanking hook silently swallowed the user's pivot to
+# matching. Same swallowing hit all three consume paths (Pattern 2 +
+# _dispatch_recommender_consume + _consume_drilldown_selection) since
+# _classify_recommender_consent wraps this classifier.
+#
+# Fix strategy (locked as Path A, 2026-07-03): keep the output enum
+# closed at yes|no|other; add a pre-check that returns "other" when
+# an explicit engine pivot is named, EVEN IF a yes/no signal is also
+# present. All three consume paths already understand "other" as
+# "do not consume, fall through" -- the router's Step 1.3 pivot-clear
+# then closes the stale pending flag when the router resolves the
+# explicit intent.
+#
+# Patterns match on engine-level pivots only. "look at related roles"
+# is deliberately NOT a pivot -- it's exactly what Pattern 2 offers,
+# so it must remain a legit yes reply.
+_MATCHING_PIVOT = re.compile(
+    r"\b(?:show|find|get)\s+(?:me\s+)?"
+    r"(?:some\s+|any\s+|more\s+|the\s+|a\s+)?"
+    r"(?:\w+\s+)?"
+    r"(?:jobs?|matches?|work|openings?|positions?|listings?)\b",
+    re.IGNORECASE,
+)
+_MATCH_ME_PIVOT = re.compile(r"\bmatch\s+me\b", re.IGNORECASE)
+_TRAINING_PIVOT = re.compile(
+    r"\bwhat\s+training\b|"
+    r"\bwhat\s+courses?\b|"
+    r"\bwhat\s+(?:certifications?|certs?)\b|"
+    r"\bwhat\s+should\s+I\s+(?:learn|study|take|improve)\b",
+    re.IGNORECASE,
+)
+_NOC_COMPARISON_PIVOT = re.compile(
+    r"\bcompare\s+(?:me|to)\b|"
+    r"\bnoc\s+standard\b",
+    re.IGNORECASE,
+)
+_EXPLORATION_PIVOT = re.compile(
+    r"\bwhat\s+else\s+can\s+I\s+do\b|"
+    r"\bother\s+careers?\b",
+    re.IGNORECASE,
+)
+
+_PIVOT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _MATCHING_PIVOT,
+    _MATCH_ME_PIVOT,
+    _TRAINING_PIVOT,
+    _NOC_COMPARISON_PIVOT,
+    _EXPLORATION_PIVOT,
+)
+
+
+def _has_pivot_intent(message: str) -> bool:
+    """True iff the message names an explicit engine-level pivot
+    intent (matching / training / NOC comparison / career exploration).
+
+    Used by the consent classifier to force "other" on mixed messages
+    like "yes, but show me jobs" so downstream code does not treat a
+    swallowed yes-with-pivot as consent to the offered action.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return False
+    return any(p.search(message) for p in _PIVOT_PATTERNS)
+
+
 def _classify_pattern_2_reply(message: str) -> str:
     """Pattern 2 consent classifier (closing-matrix v2, Step 7b /
-    Step 11b refactor, 2026-06-17).
+    Step 11b refactor, 2026-06-17; pivot-fix 2026-07-03).
 
     Classifies the user's reply to a Pattern 2 closing question
     ("want me to also look at related roles?") into one of:
@@ -514,16 +584,24 @@ def _classify_pattern_2_reply(message: str) -> str:
     Fix: delegate to the existing `_classify_intent` regex
     classifier in `truth_summary`, which has been battle-tested on
     the same kinds of natural-language replies via the planner
-    layer. It correctly identified "yes. go ahead" as
-    `impatient_proceed`. Reusing it gives:
-      - zero new vocabulary maintenance (single source of truth)
-      - free upgrades when the intent classifier improves
-      - no risk of two classifiers disagreeing on the same message
+    layer.
+
+    Pivot-fix (slice 1 follow-up, 2026-07-03): PRE-CHECK for explicit
+    engine-level pivot phrasings before the yes/no verdict. A message
+    that names a specific engine action ("show me jobs", "match me",
+    "what training") is classified as "other" -- even when a yes/no
+    signal is also present -- so downstream code never treats a
+    yes-with-pivot as consent to the offered action. All three
+    consume paths (Pattern 2 + _dispatch_recommender_consume +
+    _consume_drilldown_selection) inherit this fix because
+    _classify_recommender_consent wraps this function. See
+    _has_pivot_intent for the pivot pattern list and rationale.
 
     Signal → consent mapping (locked):
+      pivot phrase       → other (short-circuit, wins over intent)
       confirming         → yes  ("yes", "alright", "looks good")
-      impatient_proceed  → yes  ("go ahead", "show me", "just do it")
-      declining          → no   ("no", "skip", "not now")
+      impatient_proceed  → yes  ("go ahead", "let's go")
+      declining          → no   ("no thanks", "skip", "not now")
       asking_question    → other (user asked something else)
       asking_about_gap   → other (user asked about a skill gap)
       correcting         → other (user pivoted: "actually, ...")
@@ -535,6 +613,9 @@ def _classify_pattern_2_reply(message: str) -> str:
     from skillbridge.chat.truth_summary import _classify_intent
 
     if not isinstance(message, str):
+        return "other"
+    # Pivot short-circuit: explicit engine intent beats yes/no signal.
+    if _has_pivot_intent(message):
         return "other"
     intent = _classify_intent(message)
     if intent in ("confirming", "impatient_proceed"):
