@@ -17,10 +17,12 @@ Locked design contract:
     SurfaceItem(kind, label, id, ordinal). Raw snapshot payloads never
     leak through.
 
-Step 1.2 will add per-surface message_count anchors so
-`latest_surface_at_turn` becomes deterministic. Until then this module
-uses a static precedence stopgap; the getattr-with-default reads on
-the anchor fields make Step 1.2 a drop-in upgrade with no rewrite here.
+Step 1.2 (2026-07-03) landed the *_at_turn anchors on StagedProfile,
+so surface and engine ordering are now deterministic on message_count
+when anchors are present on both candidates. The static precedence
+below remains as a fallback for the case where a surface is populated
+but its anchor is None (legacy sessions, malformed cookies) -- the
+worst case degrades to the Step-1.1 behavior, never to a crash.
 """
 from __future__ import annotations
 
@@ -187,15 +189,12 @@ def _pick_latest_surface(
       2. When two surfaces tie or both anchors are None, fall back to
          the static precedence recommender > adjacent_snapshot > matches.
 
-    Step 1.2 will populate the anchor fields via getattr paths below.
-    Until then, all anchors resolve to None and the static tiebreaker
-    picks the winner. The frame's public shape does not change when
-    Step 1.2 lands.
+    Anchors landed in Step 1.2 (2026-07-03). Direct attribute reads
+    now; the None-fallback path only fires for legacy blobs or
+    malformed cookies.
     """
-    rec_at_turn = getattr(
-        staged, "last_recommender_adjacent_surface_at_turn", None
-    )
-    match_at_turn = getattr(staged, "last_presented_at_turn", None)
+    rec_at_turn = staged.last_recommender_adjacent_surface_at_turn
+    match_at_turn = staged.last_presented_at_turn
 
     rec_items = _rec_surface_items(staged)
     adj_items, adj_at_turn = _adj_snapshot_items(staged)
@@ -252,17 +251,24 @@ def _pick_latest_surface(
 def _derive_last_engine(staged: StagedProfile) -> EngineName:
     """Best-effort inference of which engine last produced output.
 
-    Slice 1 stopgap rules:
+    Ordering rules (post-Step-1.2):
       - matching signals: last_match_snapshot OR last_presented_job_titles
         OR last_adjacent_snapshot. The adjacent snapshot is the matching
         engine's sideways_move tier output -- an adjacent-JOB surface,
-        not a recommender surface -- and must count as a matching signal
-        to keep last_engine_used consistent with the surface it produces.
+        not a recommender surface -- and must count as matching to keep
+        last_engine_used consistent with the surface it produces.
       - recommender signals: last_recommender_adjacent_surface (Layer C's
         adjacent-NOC/role list).
-    When both present, recommender wins (it is the newer engine
-    architecturally; Step 1.2 anchors replace this with deterministic
-    ordering).
+      - When both present AND both sides have anchors, higher
+        message_count wins.
+      - When both present AND only one side has an anchor, the anchored
+        side wins (anchored data outranks stale unanchored data).
+      - When both present AND neither has an anchor (legacy sessions),
+        the static stopgap picks recommender.
+
+    Matching's anchor is the max of last_presented_at_turn and
+    last_adjacent_snapshot["created_message_count"]; recommender's is
+    last_recommender_adjacent_surface_at_turn.
     """
     has_matching_signal = (
         staged.last_match_snapshot is not None
@@ -270,11 +276,32 @@ def _derive_last_engine(staged: StagedProfile) -> EngineName:
         or staged.last_adjacent_snapshot is not None
     )
     has_recommender_signal = bool(staged.last_recommender_adjacent_surface)
-    if has_recommender_signal:
+
+    if not has_matching_signal and not has_recommender_signal:
+        return "none"
+    if not has_matching_signal:
         return "recommender"
-    if has_matching_signal:
+    if not has_recommender_signal:
         return "matching"
-    return "none"
+
+    # Both signals present -- consult anchors.
+    match_anchor = staged.last_presented_at_turn
+    adj_snap = staged.last_adjacent_snapshot
+    if isinstance(adj_snap, dict):
+        v = adj_snap.get("created_message_count")
+        if isinstance(v, int) and not isinstance(v, bool):
+            if match_anchor is None or v > match_anchor:
+                match_anchor = v
+    rec_anchor = staged.last_recommender_adjacent_surface_at_turn
+
+    if match_anchor is not None and rec_anchor is not None:
+        return "matching" if match_anchor > rec_anchor else "recommender"
+    if match_anchor is not None:
+        return "matching"
+    if rec_anchor is not None:
+        return "recommender"
+    # Legacy stopgap: neither side anchored.
+    return "recommender"
 
 
 def derive_frame(staged: StagedProfile) -> ConversationFrame:

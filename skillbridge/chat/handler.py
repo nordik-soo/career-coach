@@ -914,6 +914,13 @@ def _populate_recommender_adjacent_surface(
         if len(out) >= 3:
             break
     staged.last_recommender_adjacent_surface = tuple(out)
+    # Step 1.2 (2026-07-03): stamp the message_count anchor so the
+    # ConversationFrame can order this surface against competing ones
+    # (matches / adjacent-job snapshot) by recency. Only stamp when the
+    # surface is non-empty; a cleared surface takes None.
+    staged.last_recommender_adjacent_surface_at_turn = (
+        staged.message_count if out else None
+    )
 
 
 def _consume_drilldown_selection(
@@ -964,6 +971,9 @@ def _consume_drilldown_selection(
         # User declined the drilldown offer entirely.
         staged.pending_recommender_offer = None
         staged.last_recommender_adjacent_surface = ()
+        # Step 1.2 (2026-07-03): clear the surface anchor alongside the
+        # surface it points to.
+        staged.last_recommender_adjacent_surface_at_turn = None
         staged.touch()
         new_session_id = store.save(staged)
         return {
@@ -1008,6 +1018,9 @@ def _consume_drilldown_selection(
     # so main router takes over with fresh classification.
     staged.pending_recommender_offer = None
     staged.last_recommender_adjacent_surface = ()
+    # Step 1.2 (2026-07-03): clear the surface anchor alongside the
+    # surface it points to.
+    staged.last_recommender_adjacent_surface_at_turn = None
     staged.touch()
     store.save(staged)
     return None  # falls through to normal flow
@@ -4010,6 +4023,13 @@ def _capture_presented_context(
         if t and t not in titles:
             titles.append(t)
     staged.last_presented_job_titles = titles
+    # Step 1.2 (2026-07-03): stamp the message_count anchor so
+    # ConversationFrame can order the matching surface against
+    # competing ones. Only stamp when at least one title survived --
+    # a capture that yielded zero titles is functionally a clear.
+    staged.last_presented_at_turn = (
+        staged.message_count if titles else None
+    )
 
     staged.last_presented_caps_applied = list(caps_applied)[: _PRESENTED_CONTEXT_CAP]
 
@@ -4033,6 +4053,9 @@ def _clear_presented_context(staged: StagedProfile) -> None:
     staged.last_presented_job_titles = []
     staged.last_presented_caps_applied = []
     staged.last_presented_credential_gaps = []
+    # Step 1.2 (2026-07-03): companion anchor cleared alongside its
+    # surface.
+    staged.last_presented_at_turn = None
 
 
 # =========================================================================

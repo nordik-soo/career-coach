@@ -497,6 +497,24 @@ class StagedProfile:
         default_factory=tuple,
     )
 
+    # Step 1.2 (2026-07-03) — message_count anchor for the recommender's
+    # Layer C adjacent surface. Stamped alongside
+    # last_recommender_adjacent_surface at render time; cleared alongside
+    # it. Consumed by ConversationFrame._pick_latest_surface to order
+    # competing surfaces by recency (max message_count wins). Lives with
+    # its surface: cleared on target_role_text change via __setattr__.
+    # Lossless minification when None in cookie mode.
+    last_recommender_adjacent_surface_at_turn: int | None = None
+
+    # Step 1.2 (2026-07-03) — message_count anchor for the matching
+    # engine's last_presented_job_titles surface. Stamped in
+    # _capture_presented_context; cleared in _clear_presented_context.
+    # Not cleared on target_role_text change (matches the existing
+    # lifecycle of last_presented_job_titles, which is a one-turn
+    # fallback field that survives a target switch until the next
+    # present_matches decision overwrites or clears it).
+    last_presented_at_turn: int | None = None
+
     # ----------------------------------------------- attribute interception
     def __setattr__(self, name: str, value: Any) -> None:
         """Invalidate cached target_noc when target_role_text changes.
@@ -562,6 +580,14 @@ class StagedProfile:
                 # it so post-target-change selection can't pick from
                 # the stale list.
                 self.__dict__["last_recommender_adjacent_surface"] = ()
+                # Step 1.2 (2026-07-03): companion anchor for the
+                # recommender adjacent surface. Cleared alongside the
+                # surface itself; keeping a live anchor to a surface
+                # that has been dropped would make recency ordering
+                # in ConversationFrame nonsensical.
+                self.__dict__[
+                    "last_recommender_adjacent_surface_at_turn"
+                ] = None
                 # Slice 1 follow-up (2026-06-23): clear deferred
                 # career intent ONLY on a true target switch (prior
                 # value existed and new differs). On a FIRST target
@@ -784,6 +810,14 @@ class StagedProfile:
             surface = data.get("last_recommender_adjacent_surface")
             if not surface:  # () or [] or None
                 data.pop("last_recommender_adjacent_surface", None)
+            # Step 1.2 (2026-07-03): lossless minification for the two
+            # surface anchor fields. Both default to None; drop the key
+            # when unset. Explicit `is None` check because 0 is a valid
+            # anchor value (message_count starts at 0 on a fresh session).
+            if data.get("last_recommender_adjacent_surface_at_turn") is None:
+                data.pop("last_recommender_adjacent_surface_at_turn", None)
+            if data.get("last_presented_at_turn") is None:
+                data.pop("last_presented_at_turn", None)
         return json.dumps(data, separators=(",", ":"))
 
     @classmethod
@@ -876,6 +910,18 @@ class StagedProfile:
                     data["last_recommender_adjacent_surface"]
                 )
             )
+        # Step 1.2 (2026-07-03): anchor fields must be int|None. A
+        # forged cookie carrying a string or bool would otherwise be
+        # written into the dataclass and blow up recency ordering. bool
+        # is a subclass of int in Python so we exclude it explicitly.
+        for _anchor_key in (
+            "last_recommender_adjacent_surface_at_turn",
+            "last_presented_at_turn",
+        ):
+            if _anchor_key in data:
+                _v = data[_anchor_key]
+                if isinstance(_v, bool) or not isinstance(_v, int) or _v < 0:
+                    data[_anchor_key] = None
         return cls(**data, skills=skills)
 
 
