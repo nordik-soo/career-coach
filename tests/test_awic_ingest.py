@@ -456,3 +456,126 @@ class TestConnectorClass:
         """source_name is what goes into core.job_posting.source. It
         MUST be 'awic_jobs', NOT 'awic' (which is the reports connector)."""
         assert AWICJobsConnector.source_name == "awic_jobs"
+
+
+# ---------------------------------------------------------------- orchestrator wiring
+
+
+class TestOrchestratorIntegration:
+    """AWICJobsConnector wired into step_ingest_jobs end-to-end.
+
+    DB-free: write_raw_job, upsert_job, sweep_missing_jobs are stubbed
+    at the point where the orchestrator imports them. HTTP-free: the
+    fetch client uses _MockTransport serving the fixture, so the SSM
+    filter runs for real and only the two SSM-valid fixture jobs
+    reach the DB boundary.
+
+    This is the load-bearing wiring test for Step 3: it fails if
+    AWICJobsConnector is dropped from ALL_CONNECTORS, if the
+    orchestrator ever stops calling write_raw_job / upsert_job /
+    sweep_missing_jobs for a partner connector, or if the SSM filter
+    lets non-SSM postings through to the boundary.
+    """
+
+    def test_step_ingest_jobs_upserts_only_ssm_features(
+        self, monkeypatch, fixture_payload,
+    ):
+        # -- HTTP boundary: fixture served via MockTransport.
+        transport = _MockTransport(200, fixture_payload)
+        original_client = httpx.Client
+
+        def _client_with_mock(*args, **kwargs):
+            kwargs["transport"] = transport
+            return original_client(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "skillbridge.ingest.partners.httpx.Client", _client_with_mock,
+        )
+
+        # -- Force the AWIC config to enabled=True so the test is
+        #    hermetic against .env pollution (e.g. someone setting
+        #    AWIC_JOBS_ENABLED=false locally). Uses an obviously fake
+        #    URL; the MockTransport intercepts regardless of URL value.
+        class _FakeAwicCfg:
+            enabled = True
+            url = "https://mock.invalid/awic-geojson"
+
+        monkeypatch.setattr(
+            "skillbridge.ingest.partners._config",
+            lambda name: _FakeAwicCfg() if name == "awic_jobs" else None,
+        )
+
+        # -- Scope ALL_PARTNER_CONNECTORS to only AWIC. The other three
+        #    partner connectors are irrelevant to what Step 3 wires up.
+        from skillbridge.ingest.partners import AWICJobsConnector as _AWIC
+        monkeypatch.setattr(
+            "skillbridge.pipeline.orchestrator.ALL_PARTNER_CONNECTORS",
+            [_AWIC],
+        )
+
+        # -- DB boundary: record every write / upsert / sweep call.
+        raw_calls: list = []
+        upsert_calls: list = []
+        sweep_calls: list = []
+
+        monkeypatch.setattr(
+            "skillbridge.pipeline.orchestrator.write_raw_job",
+            lambda job: raw_calls.append(job),
+        )
+        # upsert_job returns truthy iff a row was inserted/updated. Our
+        # stub always returns True so the orchestrator counts every
+        # yielded job as upserted -- matching what a healthy DB does
+        # for a fresh row.
+        monkeypatch.setattr(
+            "skillbridge.pipeline.orchestrator.upsert_job",
+            lambda job: (upsert_calls.append(job), True)[1],
+        )
+        # sweep_missing_jobs returns the number of rows deactivated.
+        # Return 0 (nothing to deactivate) so the orchestrator's
+        # per-source count reflects "clean upsert-only" behavior.
+        monkeypatch.setattr(
+            "skillbridge.pipeline.orchestrator.sweep_missing_jobs",
+            lambda source, seen_ids: (
+                sweep_calls.append((source, seen_ids)), 0,
+            )[1],
+        )
+
+        from skillbridge.pipeline.orchestrator import step_ingest_jobs
+        result = step_ingest_jobs()
+
+        # -- Boundary was hit for each SSM survivor and no one else.
+        assert len(raw_calls) == 2, (
+            f"expected write_raw_job called twice (2 SSM survivors); "
+            f"got {len(raw_calls)}"
+        )
+        assert len(upsert_calls) == 2, (
+            f"expected upsert_job called twice; got {len(upsert_calls)}"
+        )
+
+        # -- Every job that reached the boundary carries source='awic_jobs'.
+        assert all(j.source == "awic_jobs" for j in raw_calls)
+        assert all(j.source == "awic_jobs" for j in upsert_calls)
+
+        # -- Only the two SSM survivors reached upsert. Outside-SSM
+        #    (post_id 8827928, Chapleau) and no-coords (post_id 99999901)
+        #    were dropped inside the connector's SSM filter and NEVER
+        #    reached the DB boundary.
+        upserted_ids = {j.source_job_id for j in upsert_calls}
+        assert upserted_ids == {"8301829", "8705234"}
+        assert "8827928" not in upserted_ids   # outside SSM bbox
+        assert "99999901" not in upserted_ids  # missing coordinates
+
+        raw_ids = {j.source_job_id for j in raw_calls}
+        assert raw_ids == {"8301829", "8705234"}
+
+        # -- sweep_missing_jobs called once with the AWIC source name
+        #    and the two survivor IDs as the seen set.
+        assert len(sweep_calls) == 1
+        source_arg, seen_ids_arg = sweep_calls[0]
+        assert source_arg == "awic_jobs"
+        assert seen_ids_arg == {"8301829", "8705234"}
+
+        # -- Orchestrator returns per-source counts keyed by source_name.
+        assert "awic_jobs" in result
+        assert result["awic_jobs"]["upserted"] == 2
+        assert result["awic_jobs"]["deactivated"] == 0

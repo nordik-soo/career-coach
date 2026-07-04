@@ -20,9 +20,11 @@ from skillbridge.db import sync_cursor
 PROHIBITED_SOURCES = {"jobbank", "job_bank", "statcan", "stat_canada", "census",
                       "opportunext", "lmi", "esdc_lmi"}
 
-# Sources required to be present (the SSM-allowed list from PR 7A).
+# Sources required to be present (the SSM-allowed list from PR 7A,
+# extended in 2026-07 by AWIC v1 which added `awic_jobs` as a peer
+# local JD source alongside `sccc` -- see BREAKING.md).
 REQUIRED_APPROVED_SOURCES = {
-    "sccc", "welcome_ssm", "city_ssm", "partner_csv",
+    "sccc", "awic_jobs", "welcome_ssm", "city_ssm", "partner_csv",
     "sault_area_hospital", "city_of_ssm_hr", "algoma_steel",
     "sault_college_careers", "algoma_u_careers", "puc",
     "group_health_centre", "ymca_ssm", "cas_algoma", "adsab", "school_board",

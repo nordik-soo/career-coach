@@ -666,6 +666,7 @@ def _row_to_job(row: dict, *, source: str) -> NormalizedJob | None:
 
 ALL_CONNECTORS: list[type[JobConnector]] = [
     SCCCConnector,
+    AWICJobsConnector,
     WelcomeSSMConnector,
     CitySSMConnector,
 ]
