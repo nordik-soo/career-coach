@@ -27,6 +27,7 @@ from skillbridge.chat.reference_resolver import (
     reset_llm_cache,
     resolve_reference,
     resolve_reference_via_llm,
+    resolve_reference_with_fallback,
 )
 
 
@@ -758,3 +759,288 @@ class TestLLMFallbackNoLabelNormalization:
             "labels are not normalized in the cache key; a malformed "
             "label should not collide with its clean equivalent"
         )
+
+
+# ---------------------------------------------------------------- composition (Step 2.4)
+
+
+class TestComposedResolverShortCircuits:
+    """When deterministic has a definitive answer, LLM must not be
+    called. Verifies short-circuit rules 1-4 of the locked
+    composition."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def _fail_llm(self, monkeypatch):
+        """Install a stub that raises if the LLM is invoked."""
+        def _boom(*a, **k):
+            raise AssertionError("LLM must not be called on this path")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _boom,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+
+    def test_deterministic_ordinal_hit_skips_llm(self, monkeypatch):
+        self._fail_llm(monkeypatch)
+        out = resolve_reference_with_fallback(
+            message="the first", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "resolved"
+        assert out.reason == "ordinal"
+
+    def test_deterministic_label_hit_skips_llm(self, monkeypatch):
+        self._fail_llm(monkeypatch)
+        out = resolve_reference_with_fallback(
+            message="Administrative assistant", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "resolved"
+        assert out.reason == "label_match_unique"
+
+    def test_deterministic_pronoun_on_single_item_skips_llm(
+        self, monkeypatch,
+    ):
+        self._fail_llm(monkeypatch)
+        out = resolve_reference_with_fallback(
+            message="that", surface_items=_ONE_ROLE,
+        )
+        assert out.status == "resolved"
+        assert out.reason == "single_item_pronoun"
+
+    def test_deterministic_multi_item_pronoun_clarification_skips_llm(
+        self, monkeypatch,
+    ):
+        """Deterministic returned clarification -- LLM must not
+        override it. The deterministic layer's clarification is a
+        definitive answer, not a "we don't know"."""
+        self._fail_llm(monkeypatch)
+        out = resolve_reference_with_fallback(
+            message="that one", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "clarification"
+        assert out.reason == "multi_item_pronoun"
+
+    def test_deterministic_label_match_ambiguous_skips_llm(self, monkeypatch):
+        self._fail_llm(monkeypatch)
+        out = resolve_reference_with_fallback(
+            message="Administrative assistant or Accounting clerk?",
+            surface_items=_THREE_ROLES,
+        )
+        assert out.status == "clarification"
+        assert out.reason == "label_match_ambiguous"
+
+
+class TestComposedResolverFallthrough:
+    """When deterministic returns no_reference AND surface is
+    non-empty AND llm_enabled=True, LLM must be called and its
+    outcome returned."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def _stub_llm(self, monkeypatch, value: str):
+        call_count = {"n": 0}
+        def _fake(*a, **k):
+            call_count["n"] += 1
+            return value
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fake,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        return call_count
+
+    def test_deterministic_no_signal_falls_through_to_llm(self, monkeypatch):
+        """The primary fallthrough case: message doesn't hit any
+        deterministic rule but the surface has items and the caller
+        allowed LLM."""
+        calls = self._stub_llm(monkeypatch, "item_1")
+        out = resolve_reference_with_fallback(
+            message="admin secretary",  # near-miss for Administrative assistant
+            surface_items=_THREE_ROLES,
+        )
+        assert calls["n"] == 1
+        assert out.status == "resolved"
+        assert out.item is _THREE_ROLES[0]
+        assert out.reason == "llm_selected"
+
+    def test_llm_clarification_propagates(self, monkeypatch):
+        """LLM returned clarification -- composed helper propagates
+        the LLM's reason verbatim, distinct from the deterministic
+        clarification reason."""
+        calls = self._stub_llm(monkeypatch, "clarification")
+        out = resolve_reference_with_fallback(
+            message="admin something", surface_items=_THREE_ROLES,
+        )
+        assert calls["n"] == 1
+        assert out.status == "clarification"
+        assert out.reason == "llm_clarification"
+
+    def test_llm_no_match_propagates(self, monkeypatch):
+        calls = self._stub_llm(monkeypatch, "no_match")
+        out = resolve_reference_with_fallback(
+            message="tell me about the weather", surface_items=_THREE_ROLES,
+        )
+        assert calls["n"] == 1
+        assert out.status == "no_reference"
+        assert out.reason == "llm_no_match"
+
+
+class TestComposedResolverCallerDisabledFallback:
+    """llm_enabled=False must preserve the deterministic outcome and
+    reason verbatim -- no invented "suppressed" state."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def _fail_llm(self, monkeypatch):
+        def _boom(*a, **k):
+            raise AssertionError("LLM must not be called when llm_enabled=False")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _boom,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+
+    def test_deterministic_no_signal_preserved_when_llm_disabled(
+        self, monkeypatch,
+    ):
+        """The load-bearing telemetry test: caller passed
+        llm_enabled=False, deterministic said no_signal. Reason must
+        stay `no_signal` -- NOT rewritten to `llm_suppressed` or
+        similar."""
+        self._fail_llm(monkeypatch)
+        out = resolve_reference_with_fallback(
+            message="admin secretary",
+            surface_items=_THREE_ROLES,
+            llm_enabled=False,
+        )
+        assert out.status == "no_reference"
+        assert out.reason == "no_signal", (
+            "deterministic reason must be preserved verbatim when caller "
+            "disabled fallback -- do not invent a suppressed state"
+        )
+
+    def test_deterministic_resolved_preserved_when_llm_disabled(
+        self, monkeypatch,
+    ):
+        """llm_enabled=False on a deterministic-hit path is a no-op."""
+        self._fail_llm(monkeypatch)
+        out = resolve_reference_with_fallback(
+            message="the first",
+            surface_items=_THREE_ROLES,
+            llm_enabled=False,
+        )
+        assert out.status == "resolved"
+        assert out.reason == "ordinal"
+
+    def test_deterministic_clarification_preserved_when_llm_disabled(
+        self, monkeypatch,
+    ):
+        self._fail_llm(monkeypatch)
+        out = resolve_reference_with_fallback(
+            message="that one",
+            surface_items=_THREE_ROLES,
+            llm_enabled=False,
+        )
+        assert out.status == "clarification"
+        assert out.reason == "multi_item_pronoun"
+
+
+class TestComposedResolverEmptySurface:
+    """Empty surface -- both deterministic and LLM would short-circuit
+    on this. The composed helper must skip the LLM call outright."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def test_empty_surface_skips_llm_call(self, monkeypatch):
+        def _fail(*a, **k):
+            raise AssertionError(
+                "LLM must not be called with empty surface -- both layers "
+                "short-circuit on no_surface anyway; skipping saves the call"
+            )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fail,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        out = resolve_reference_with_fallback(
+            message="admin secretary", surface_items=(),
+        )
+        assert out.status == "no_reference"
+        assert out.reason == "no_surface"
+
+
+class TestComposedResolverTelemetryReasonSignals:
+    """Locked telemetry contract: the composed helper preserves three
+    distinct "no LLM answer" signals downstream can grep on:
+      1. deterministic `reason` when caller disabled fallback
+      2. `llm_disabled` when LLM was runtime-disabled inside Step 2.3
+      3. specific LLM failure reasons when the fallback ran
+
+    This class pins that these three states are visibly distinct in
+    ResolveOutcome.reason."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def test_caller_disabled_signal(self, monkeypatch):
+        """Caller signal: llm_enabled=False."""
+        # LLM not called -- so monkeypatching it is defensive only.
+        def _fail(*a, **k):
+            raise AssertionError("LLM must not be called")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fail,
+        )
+        out = resolve_reference_with_fallback(
+            message="admin secretary",
+            surface_items=_THREE_ROLES,
+            llm_enabled=False,
+        )
+        assert out.reason == "no_signal"  # deterministic reason preserved
+
+    def test_runtime_disabled_signal(self, monkeypatch):
+        """Config signal: LLM_ENABLED=False at runtime, caller allowed
+        fallback. Step 2.3 short-circuits with llm_disabled; composed
+        helper propagates it verbatim."""
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", False,
+        )
+        def _fail(*a, **k):
+            raise AssertionError(
+                "LLM must not be called when LLM_ENABLED=False"
+            )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fail,
+        )
+        out = resolve_reference_with_fallback(
+            message="admin secretary",
+            surface_items=_THREE_ROLES,
+            # llm_enabled=True (default) -- caller allowed fallback
+        )
+        assert out.reason == "llm_disabled", (
+            "config-level disable is a different signal from caller-level "
+            "disable -- Step 2.3's reason must propagate verbatim"
+        )
+
+    def test_llm_failure_signal_propagates(self, monkeypatch):
+        """LLM ran and hit an API failure. `llm_error` is a third,
+        distinct signal from the two disabled cases above."""
+        def _boom(*a, **k):
+            raise RuntimeError("simulated failure")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _boom,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        out = resolve_reference_with_fallback(
+            message="admin secretary", surface_items=_THREE_ROLES,
+        )
+        assert out.reason == "llm_error"

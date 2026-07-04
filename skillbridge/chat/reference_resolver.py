@@ -610,3 +610,56 @@ def reset_llm_cache() -> None:
 def llm_cache_size() -> int:
     """Test helper: current cache entry count."""
     return len(_LLM_CACHE)
+
+
+# ---------------------------------------------------------------- composition (Step 2.4)
+
+
+def resolve_reference_with_fallback(
+    *,
+    message: str,
+    surface_items: tuple[SurfaceItem, ...],
+    llm_enabled: bool = True,
+) -> ResolveOutcome:
+    """Composed resolver: deterministic first, LLM fallback second.
+
+    Locked composition (Step 2.4, 2026-07-03):
+
+      1. Run the deterministic layer.
+      2. If it returned anything other than `no_reference` (i.e.
+         `resolved` or `clarification`), return that outcome. The
+         deterministic layer is the source of truth when it has one.
+      3. If the caller passed `llm_enabled=False`, return the
+         deterministic outcome unchanged -- caller intentionally
+         suppressed fallback; preserve the deterministic `reason`
+         verbatim rather than inventing a "suppressed" state.
+      4. If the surface is empty, return the deterministic outcome
+         unchanged. LLM fallback would just short-circuit on the same
+         condition; skipping saves an unnecessary function call.
+      5. Otherwise call the LLM fallback and return its outcome.
+
+    Telemetry note (locked): three distinct "no LLM answer" signals
+    are preserved through this helper:
+      - deterministic reason (e.g. `no_signal`) when caller passed
+        `llm_enabled=False` or when the surface is empty
+      - `llm_disabled` when the LLM was runtime-disabled inside
+        `resolve_reference_via_llm` (config-level, not caller-level)
+      - specific LLM failure reasons (`llm_error`, `llm_invalid`,
+        `llm_out_of_range`, `llm_no_match`) when the fallback ran
+    Callers should not conflate these three signals downstream.
+
+    Kw-only signature deliberately -- this is the primary public
+    entry point for slice 2 consumers (the wiring in Step 2.6), and
+    named args prevent an accidental positional swap of message and
+    surface_items.
+    """
+    deterministic = resolve_reference(message, surface_items)
+    if deterministic.status != "no_reference":
+        return deterministic
+    if not llm_enabled:
+        return deterministic
+    if not surface_items:
+        return deterministic
+    return resolve_reference_via_llm(
+        message=message, surface_items=surface_items,
+    )
