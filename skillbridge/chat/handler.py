@@ -1063,6 +1063,101 @@ def _consume_drilldown_selection(
     # for frame telemetry.
     _tele_pending_before = snapshot_pending_flags(staged)
     surface = staged.last_recommender_adjacent_surface or ()
+
+    # === Step 2.6 Stage A: matching-handoff hijack (locked 2026-07-04) ===
+    #
+    # BEFORE the existing drilldown resolver runs, detect explicit
+    # matching-handoff intent via Path A's _has_pivot_intent. If
+    # present, run the composed reference resolver against the frame's
+    # latest_surface_items:
+    #   - resolved role -> handoff + return None (matching flow handles)
+    #   - clarification -> emit clarification prompt + return dict
+    #   - no_reference  -> fall through to existing drilldown resolver
+    #
+    # Without pivot intent, "the second one" MUST keep meaning drilldown
+    # (existing behavior below is unchanged). The pivot gate is what
+    # makes "match me to the second one" hand off to matching while
+    # bare "the second one" stays as a drilldown selection.
+    if _has_pivot_intent(user_message):
+        from skillbridge.chat.conversation_frame import derive_frame
+        from skillbridge.chat.reference_handoff import (
+            handoff_recommender_to_matching,
+        )
+        from skillbridge.chat.reference_resolver import (
+            build_clarification_prompt,
+            resolve_reference_with_fallback,
+        )
+
+        _frame = derive_frame(staged)
+        _outcome = resolve_reference_with_fallback(
+            message=user_message,
+            surface_items=_frame.latest_surface_items,
+        )
+
+        if (
+            _outcome.status == "resolved"
+            and _outcome.item is not None
+            and _outcome.item.kind == "role"
+        ):
+            handoff_recommender_to_matching(staged, _outcome.item)
+            # Coarse telemetry: distinguish deterministic vs LLM
+            # resolution paths using the resolver's fine-grained reason.
+            _res_outcome = (
+                "llm_fallback"
+                if _outcome.reason == "llm_selected"
+                else "deterministic"
+            )
+            emit_frame_telemetry(
+                staged=staged,
+                path="drilldown_handoff_matching",
+                pending_before=_tele_pending_before,
+                resolution_outcome=_res_outcome,
+            )
+            # Return None so handle_anonymous falls through to the
+            # matching flow with the freshly-written target_role_text.
+            # Pending offer + surface + anchor were cleared by the
+            # __setattr__ cascade on target write.
+            return None
+
+        if _outcome.status == "clarification":
+            _prompt = build_clarification_prompt(
+                _frame.latest_surface_items
+            )
+            if _prompt:
+                staged.touch()
+                new_session_id = store.save(staged)
+                emit_frame_telemetry(
+                    staged=staged,
+                    path="drilldown_handoff_clarification",
+                    pending_before=_tele_pending_before,
+                    resolution_outcome="clarification_asked",
+                )
+                return {
+                    "reply": _prompt,
+                    "profile_id": None,
+                    "session_id": new_session_id,
+                    "intake_state": staged.intake_state,
+                    "asked_slots": [],
+                    "next_action": intake_state.ACTION_ACKNOWLEDGE_AND_WAIT,
+                    "recommended_jobs": [],
+                    "next_skill_suggestion": None,
+                    "resume_info": resume_info,
+                    "requires_consent": True,
+                }
+            # Prompt builder returned empty (< 2 usable labels after
+            # filter -- defensive short-circuit). Fall through to the
+            # existing drilldown resolver rather than reply with empty
+            # copy.
+
+        # outcome.status == "no_reference": pivot intent present but
+        # nothing resolved (e.g. bare "show me jobs"). Fall through to
+        # the existing drilldown resolver below. If that also misses,
+        # the existing consent-classifier / consent="other" path fires
+        # (Path A returns "other" on matching-pivot phrasing), and its
+        # existing "drilldown_no" / fallthrough telemetry covers the
+        # exit -- no new emit needed here.
+    # === End Stage A ===
+
     selected = resolve_drilldown_selection(user_message, surface)
     if selected is not None:
         emit_frame_telemetry(

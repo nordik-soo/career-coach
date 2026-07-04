@@ -347,3 +347,77 @@ class TestNoRaise:
             "emit_failed" in r.getMessage()
             for r in caplog.records
         )
+
+
+# ---------------------------------------------------------------- resolution_outcome (Step 2.6)
+
+
+class TestResolutionOutcomeField:
+    """Step 2.6 added the resolution_outcome field to the emitter. It
+    defaults to `not_attempted` so pre-Step-2.6 emit sites continue
+    to log a well-formed line. Valid enum values pass through; anything
+    else defensive-coerces to not_attempted with a warning."""
+
+    def test_default_renders_as_not_attempted(self, caplog):
+        s = _new_staged()
+        with caplog.at_level(
+            logging.INFO, logger="skillbridge.chat.frame_telemetry"
+        ):
+            emit_frame_telemetry(
+                staged=s,
+                path="unit_test",
+                pending_before=(),
+                # resolution_outcome intentionally not passed
+            )
+        kv = _kv(_find_record(caplog).getMessage())
+        assert kv["resolution_outcome"] == "not_attempted"
+
+    @pytest.mark.parametrize("value", [
+        "deterministic",
+        "llm_fallback",
+        "clarification_asked",
+        "no_reference",
+        "not_attempted",
+    ])
+    def test_locked_enum_values_pass_through(self, caplog, value):
+        s = _new_staged()
+        with caplog.at_level(
+            logging.INFO, logger="skillbridge.chat.frame_telemetry"
+        ):
+            emit_frame_telemetry(
+                staged=s,
+                path="unit_test",
+                pending_before=(),
+                resolution_outcome=value,
+            )
+        kv = _kv(_find_record(caplog).getMessage())
+        assert kv["resolution_outcome"] == value
+
+    def test_invalid_value_coerces_to_not_attempted_with_warning(
+        self, caplog,
+    ):
+        s = _new_staged()
+        # Capture at INFO so both the WARNING and the INFO
+        # frame_telemetry record land in caplog.records.
+        with caplog.at_level(
+            logging.INFO, logger="skillbridge.chat.frame_telemetry"
+        ):
+            emit_frame_telemetry(
+                staged=s,
+                path="unit_test",
+                pending_before=(),
+                resolution_outcome="some_bogus_value",
+            )
+        # Warning record: contains "invalid" and the bad value.
+        warn = next(
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "invalid" in r.getMessage()
+        )
+        assert "some_bogus_value" in warn.getMessage()
+        # Info record: emits the frame_telemetry line with the coerced token.
+        info = next(
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "frame_telemetry" in r.getMessage()
+        )
+        kv = _kv(info.getMessage())
+        assert kv["resolution_outcome"] == "not_attempted"

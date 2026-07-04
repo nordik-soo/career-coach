@@ -16,15 +16,24 @@ Locked fields (do not change without co-decision):
   session, path, msg_count, pattern_intent, career_intent,
   router_action, router_reason, pending_before, pending_after,
   active_target_noc, latest_surface, latest_surface_at_turn,
-  last_engine
+  last_engine, resolution_outcome
 
 Privacy: NEVER emit user_message text or target_role_text (both are
 free-text and could carry PII). Only stable enums, NOC codes, and
 machine state pass through this surface.
 
-Slice 2 will add `resolution_outcome` when the reference resolver
-lands. Adding it now would be dishonest telemetry -- there is no
-resolver to describe.
+`resolution_outcome` added in Step 2.6 (slice 2). Coarse telemetry for
+the reference resolver's per-turn verdict. Locked enum values:
+  deterministic       -- resolver returned resolved via Step 2.1 layer
+  llm_fallback        -- resolver returned resolved via Step 2.3 LLM
+  clarification_asked -- resolver returned clarification; prompt emitted
+  no_reference        -- resolver ran and returned no_reference
+  not_attempted       -- resolver was NOT invoked on this terminal
+                         (default: matches every Step 1.4 emit site
+                         that predates the resolver wiring)
+Detailed per-layer reasons stay on ResolveOutcome.reason (e.g.
+ordinal, label_match_unique, llm_selected, llm_no_match). This
+field is the coarse rollup for log analysis.
 """
 from __future__ import annotations
 
@@ -86,6 +95,15 @@ def _fmt_optional(value: Any) -> str:
     return str(value)
 
 
+_VALID_RESOLUTION_OUTCOMES: frozenset[str] = frozenset({
+    "deterministic",
+    "llm_fallback",
+    "clarification_asked",
+    "no_reference",
+    "not_attempted",
+})
+
+
 def emit_frame_telemetry(
     *,
     staged: StagedProfile,
@@ -95,6 +113,7 @@ def emit_frame_telemetry(
     career_intent: str | None = None,
     router_action: str | None = None,
     router_reason: str | None = None,
+    resolution_outcome: str | None = None,
 ) -> None:
     """Emit one structured log line for a terminal response path this
     slice touches.
@@ -114,6 +133,15 @@ def emit_frame_telemetry(
     so pattern_intent/career_intent/router_action/router_reason are
     None there and emit as `none`.
 
+    `resolution_outcome` is the Step 2.6 field. Default None renders
+    as `not_attempted` so every Step 1.4 emit site (which predates the
+    resolver wiring) continues to log a well-formed line without
+    modification. Non-None values must be in the locked enum
+    (`deterministic`, `llm_fallback`, `clarification_asked`,
+    `no_reference`, `not_attempted`); anything else is defensive-
+    coerced to `not_attempted` with a warning rather than crashing
+    telemetry.
+
     Never raises: telemetry is best-effort observability, not a
     blocking side effect. If the frame derivation itself throws
     (shouldn't; it's pure and defensive), the exception is logged and
@@ -125,12 +153,24 @@ def emit_frame_telemetry(
         session_prefix = (
             staged.session_id[:8] if staged.session_id else _NULL_TOKEN
         )
+        if resolution_outcome is None:
+            outcome_token = "not_attempted"
+        elif resolution_outcome not in _VALID_RESOLUTION_OUTCOMES:
+            log.warning(
+                "frame_telemetry invalid resolution_outcome=%r; "
+                "coerced to not_attempted",
+                resolution_outcome,
+            )
+            outcome_token = "not_attempted"
+        else:
+            outcome_token = resolution_outcome
         log.info(
             "frame_telemetry session=%s path=%s msg_count=%d "
             "pattern_intent=%s career_intent=%s router_action=%s "
             "router_reason=%s pending_before=%s pending_after=%s "
             "active_target_noc=%s latest_surface=%s "
-            "latest_surface_at_turn=%s last_engine=%s",
+            "latest_surface_at_turn=%s last_engine=%s "
+            "resolution_outcome=%s",
             session_prefix,
             path,
             staged.message_count,
@@ -144,6 +184,7 @@ def emit_frame_telemetry(
             frame.latest_surface_type,
             _fmt_optional(frame.latest_surface_at_turn),
             frame.last_engine_used,
+            outcome_token,
         )
     except Exception:  # noqa: BLE001
         log.exception(
