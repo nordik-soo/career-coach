@@ -1893,6 +1893,90 @@ def _maybe_route_recommender_from_intent(
     # (deferred_intent consume, target_noc resolution, pivot-clear).
     _tele_pending_before = snapshot_pending_flags(staged)
 
+    # === Step 2.6 Stage B: matching-handoff pre-classifier (locked 2026-07-04) ===
+    #
+    # Peer to the LLM career-intent classifier, not downstream of it.
+    # Runs BEFORE `_classify_intent` / `classify_career_intent` so that
+    # when the user's message names a role reference on the current
+    # frame's surface AND carries pivot intent, we hand off to matching
+    # without paying the LLM classifier round-trip.
+    #
+    # Gated by Path A's _has_pivot_intent so bare ordinals ("the second
+    # one") in a non-drilldown context keep going through the normal
+    # classifier + router chain. The frame's latest_surface_items
+    # returns () when no surface is up, and the resolver cheap-returns
+    # no_reference/no_surface in that case -- straight run, no
+    # surface-type gate.
+    #
+    # kind guard: if the resolver returns a resolved item whose kind
+    # is "job" (theoretically possible if derive_frame picks a matching
+    # surface), do NOT hand off (Step 2.5's handoff helper is role-only
+    # and would raise ValueError). Fall through to the classifier.
+    if _has_pivot_intent(message):
+        from skillbridge.chat.conversation_frame import derive_frame as _s2_derive_frame
+        from skillbridge.chat.reference_handoff import (
+            handoff_recommender_to_matching as _s2_handoff,
+        )
+        from skillbridge.chat.reference_resolver import (
+            build_clarification_prompt as _s2_build_prompt,
+            resolve_reference_with_fallback as _s2_resolve,
+        )
+
+        _frame = _s2_derive_frame(staged)
+        _outcome = _s2_resolve(
+            message=message,
+            surface_items=_frame.latest_surface_items,
+        )
+
+        if (
+            _outcome.status == "resolved"
+            and _outcome.item is not None
+            and _outcome.item.kind == "role"
+        ):
+            _s2_handoff(staged, _outcome.item)
+            _res_outcome = (
+                "llm_fallback"
+                if _outcome.reason == "llm_selected"
+                else "deterministic"
+            )
+            emit_frame_telemetry(
+                staged=staged,
+                path="route_handoff_matching",
+                pending_before=_tele_pending_before,
+                resolution_outcome=_res_outcome,
+            )
+            # Return None so handle_anonymous falls through to the
+            # matching flow with the freshly-written target_role_text.
+            # Recommender surface + pending offer + anchor were cleared
+            # by the __setattr__ cascade on target write.
+            return None
+
+        if _outcome.status == "clarification":
+            _prompt = _s2_build_prompt(_frame.latest_surface_items)
+            if _prompt:
+                emit_frame_telemetry(
+                    staged=staged,
+                    path="route_handoff_clarification",
+                    pending_before=_tele_pending_before,
+                    resolution_outcome="clarification_asked",
+                )
+                return _emit_canned_response(
+                    staged=staged, store=store,
+                    reply=_prompt, resume_info=None,
+                    asked_slot=None,
+                )
+            # Prompt builder returned empty (defensive short-circuit
+            # on < 2 usable labels). Fall through to the classifier
+            # rather than reply with empty copy.
+
+        # outcome.status == "no_reference" OR resolved-but-job-kind:
+        # fall through to the existing classifier + router flow below.
+        # No new telemetry emit here -- the existing route_* emit sites
+        # cover their own terminals with resolution_outcome=not_attempted
+        # (the default), which is honest: at their emit point, no
+        # resolution was applied by the router path.
+    # === End Stage B ===
+
     try:
         pattern_intent = _classify_intent(message)
         # Slice 1 (2026-06-23): thread last_asked_slot[0] as the
