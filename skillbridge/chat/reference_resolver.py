@@ -32,11 +32,25 @@ the caller has already derived surface items from it.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Literal
 
+import anthropic
+
+from config import (
+    ANTHROPIC_API_KEY,
+    LLM_ENABLED,
+    LLM_FALLBACK_MODEL,
+    LLM_MODEL,
+    LLM_TIMEOUT_SECONDS,
+)
+
 from skillbridge.chat.conversation_frame import SurfaceItem
+
+
+log = logging.getLogger(__name__)
 
 
 ResolveStatus = Literal["resolved", "clarification", "no_reference"]
@@ -284,3 +298,315 @@ def build_clarification_prompt(
         listing = ", ".join(labels[:-1]) + f", or {labels[-1]}"
 
     return f"{_CLARIFICATION_LEAD} {_EM_DASH} {listing}?"
+
+
+# ---------------------------------------------------------------- LLM fallback (Step 2.3)
+
+
+# Locked with lead 2026-07-03:
+#   - reuse existing LLM_MODEL + LLM_FALLBACK_MODEL from config (no new
+#     model knob for this task; keeps the resolver aligned with the
+#     classifier stack)
+#   - full-identity cache key including kind so a job posting and a
+#     role/NOC with the same label never share a cached resolution
+#   - message normalized to strip().lower() in the cache key only;
+#     labels/ids pass through untouched so malformed surfaces stay
+#     visible rather than being silently normalized
+#   - enum-constrained tool_use, item_1..item_N + clarification +
+#     no_match; NO free-text target invention
+_TOOL_NAME = "select_referenced_item"
+
+
+# Fully sorted for cache-friendliness of the system prompt (tools
+# render before system per Anthropic's cache prefix ordering).
+_LLM_SYSTEM_PROMPT = """You are a reference resolver for SkillBridge SSM. The user has just been shown a numbered list of items (job postings or occupational roles) by the coach. Your job is to decide which item the user's next message references.
+
+You MUST call the `select_referenced_item` tool. Output NO prose. Output NO other tool call. The tool call IS your response.
+
+SELECTION VALUES:
+
+- `item_N`: the user's message clearly refers to item N (1-indexed). Use this for near-misses ("admin secretary" -> "Administrative assistant"), common abbreviations ("AP clerk" -> "Accounts payable clerk"), and paraphrases that unambiguously identify ONE item on the list.
+
+- `clarification`: the user's message references SOMETHING on the list but is ambiguous between two or more items. Use this when a token could match multiple items (e.g. user says "admin" and the list has "Administrative assistant" AND "Administrative clerk").
+
+- `no_match`: the user's message does not reference any item on the list. Includes: unrelated topics, general questions, requests for something outside the list.
+
+RULES:
+
+1. The deterministic pre-filter has already tried ordinals (first / 1st / #2) and exact substring name match. If either would have worked, this call would not fire. So you are handling near-misses, abbreviations, and paraphrases only.
+
+2. Do NOT invent new target names. If the user mentions a role or job that is NOT on the list, that is `no_match`, not `clarification`. Never guess an item just because the user seems to want one.
+
+3. Case-insensitive matching is fine. Common abbreviations ("admin" for administrative, "AP" for accounts payable) are legitimate reference signals.
+
+4. Ambiguity between two or more items on the list is `clarification`, never a guess. Better to ask than to pick wrong.
+
+5. `no_match` is the safe default when uncertain. The caller falls through to normal routing on `no_match`; a wrong item selection would silently pivot the user to a target they did not choose.
+"""
+
+
+# Cache: process-wide, keyed on
+#   (normalized message, ((kind, label, id), ...) for each surface item)
+# See module locked-design note for rationale.
+_LLM_CACHE: dict[
+    tuple[str, tuple[tuple[str, str, str | None], ...]],
+    ResolveOutcome,
+] = {}
+
+
+_client: anthropic.Anthropic | None = None
+
+
+def _client_get() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY.startswith("PLACEHOLDER"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY missing or placeholder. "
+                "Set LLM_ENABLED=false to disable LLM reference resolution."
+            )
+        _client = anthropic.Anthropic(
+            api_key=ANTHROPIC_API_KEY,
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
+    return _client
+
+
+def _cache_key(
+    message: str,
+    surface_items: tuple[SurfaceItem, ...],
+) -> tuple[str, tuple[tuple[str, str, str | None], ...]]:
+    """Locked cache-key shape: normalized message + full-identity item
+    tuples in surface order."""
+    norm_msg = message.strip().lower()
+    surface_tuple = tuple(
+        (it.kind, it.label, it.id) for it in surface_items
+    )
+    return (norm_msg, surface_tuple)
+
+
+def _build_tool_schema(n: int) -> dict:
+    """Build the Anthropic tool_use schema with a dynamic enum sized to
+    the current surface. N is the number of items in the surface (1..N).
+
+    Enum values: item_1, item_2, ..., item_N, clarification, no_match.
+    """
+    item_values = [f"item_{i}" for i in range(1, n + 1)]
+    enum_values = item_values + ["clarification", "no_match"]
+    return {
+        "name": _TOOL_NAME,
+        "description": (
+            "Select which item on the surfaced list the user's message "
+            "references, or return clarification / no_match."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "selection": {
+                    "type": "string",
+                    "enum": enum_values,
+                    "description": (
+                        "One of item_1..item_N naming a specific item, "
+                        "or clarification if ambiguous, or no_match "
+                        "if the message doesn't reference any item."
+                    ),
+                },
+            },
+            "required": ["selection"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def _build_user_block(
+    message: str,
+    surface_items: tuple[SurfaceItem, ...],
+) -> str:
+    """Serialize the user message + numbered surface list for the LLM."""
+    lines = [f"USER_MESSAGE: {message}", "", "OPTIONS:"]
+    for i, item in enumerate(surface_items, start=1):
+        label = item.label or "(no label)"
+        # Include kind + id so the model can distinguish role-vs-job
+        # and NOC-vs-job-id without us pre-formatting.
+        id_hint = f" [{item.id}]" if item.id else ""
+        lines.append(f"{i}. {label}{id_hint}  (kind: {item.kind})")
+    return "\n".join(lines)
+
+
+def _interpret_llm_selection(
+    raw: str,
+    surface_items: tuple[SurfaceItem, ...],
+) -> ResolveOutcome:
+    """Map the tool_use enum value back to a ResolveOutcome.
+
+    Defensive: unknown values or out-of-range item_N coerce to
+    no_reference with a distinct `reason` for telemetry.
+    """
+    if raw == "clarification":
+        return ResolveOutcome(
+            status="clarification", item=None, reason="llm_clarification",
+        )
+    if raw == "no_match":
+        return ResolveOutcome(
+            status="no_reference", item=None, reason="llm_no_match",
+        )
+    match = re.fullmatch(r"item_(\d+)", raw)
+    if match is not None:
+        try:
+            n = int(match.group(1))
+        except ValueError:
+            return ResolveOutcome(
+                status="no_reference", item=None, reason="llm_invalid",
+            )
+        if 1 <= n <= len(surface_items):
+            return ResolveOutcome(
+                status="resolved",
+                item=surface_items[n - 1],
+                reason="llm_selected",
+            )
+        return ResolveOutcome(
+            status="no_reference", item=None, reason="llm_out_of_range",
+        )
+    return ResolveOutcome(
+        status="no_reference", item=None, reason="llm_invalid",
+    )
+
+
+def _call_reference_llm(
+    message: str,
+    surface_items: tuple[SurfaceItem, ...],
+) -> str:
+    """Issue the tool_use call. Returns the raw selection string
+    (item_N | clarification | no_match) or raises. Caller is
+    responsible for enum-value validation.
+
+    Mirrors classify_career_intent's shape: same system-prompt cache
+    control, same 429/529/503 fallback-model retry, temperature=0 for
+    stability.
+    """
+    client = _client_get()
+    user_block = _build_user_block(message, surface_items)
+    system_blocks = [{
+        "type": "text",
+        "text": _LLM_SYSTEM_PROMPT,
+        "cache_control": {"type": "ephemeral"},
+    }]
+    tool_schema = _build_tool_schema(len(surface_items))
+
+    def _do_call(model: str):
+        return client.messages.create(
+            model=model,
+            max_tokens=200,
+            temperature=0,
+            system=system_blocks,
+            tools=[tool_schema],
+            tool_choice={"type": "tool", "name": _TOOL_NAME},
+            messages=[{"role": "user", "content": user_block}],
+        )
+
+    try:
+        resp = _do_call(LLM_MODEL)
+    except anthropic.APIStatusError as e:
+        if e.status_code in (429, 529, 503) and LLM_MODEL != LLM_FALLBACK_MODEL:
+            log.warning(
+                "reference_resolver LLM overloaded on %s; falling back to %s",
+                LLM_MODEL, LLM_FALLBACK_MODEL,
+            )
+            resp = _do_call(LLM_FALLBACK_MODEL)
+        else:
+            raise
+
+    for block in resp.content:
+        if getattr(block, "type", None) != "tool_use":
+            continue
+        if getattr(block, "name", None) != _TOOL_NAME:
+            continue
+        tool_input = getattr(block, "input", None)
+        if not isinstance(tool_input, dict):
+            continue
+        selection = tool_input.get("selection")
+        if isinstance(selection, str):
+            return selection
+    raise RuntimeError("LLM returned no usable tool_use block")
+
+
+def resolve_reference_via_llm(
+    *,
+    message: str,
+    surface_items: tuple[SurfaceItem, ...],
+) -> ResolveOutcome:
+    """LLM fallback resolver (Step 2.3 of slice 2).
+
+    Called by the composed resolver (Step 2.4) after `resolve_reference`
+    returns `no_reference` with a non-empty surface. Handles near-misses
+    ("admin secretary" vs "Administrative assistant"), abbreviations,
+    and paraphrases via Anthropic tool_use with an enum-constrained
+    output. The enum guarantees the LLM cannot invent a free-text
+    target name.
+
+    Defensive short-circuits (all return no_reference with a distinct
+    `reason` for telemetry):
+      - non-string / empty / whitespace-only message
+      - empty surface (nothing to resolve to)
+      - LLM_ENABLED=false at config level
+      - API call fails (network, auth, retryable overload after
+        fallback also fails)
+      - tool returns an invalid / unrecognized selection
+      - tool returns item_N where N is out of range
+
+    Cache: process-wide, keyed on (normalized message, item-identity
+    tuple). Failures are cached too, matching the existing intent
+    classifier's pattern -- prevents retry storms and keeps behavior
+    deterministic across the same input tuple.
+    """
+    if not isinstance(message, str):
+        return ResolveOutcome(
+            status="no_reference", item=None, reason="non_string_message",
+        )
+    if not message.strip():
+        return ResolveOutcome(
+            status="no_reference", item=None, reason="empty_message",
+        )
+    if not surface_items:
+        return ResolveOutcome(
+            status="no_reference", item=None, reason="no_surface",
+        )
+
+    key = _cache_key(message, surface_items)
+    cached = _LLM_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    if not LLM_ENABLED:
+        result = ResolveOutcome(
+            status="no_reference", item=None, reason="llm_disabled",
+        )
+        _LLM_CACHE[key] = result
+        return result
+
+    try:
+        raw = _call_reference_llm(message.strip(), surface_items)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "reference_resolver llm_call_failed (%s); returning no_reference",
+            type(exc).__name__,
+        )
+        result = ResolveOutcome(
+            status="no_reference", item=None, reason="llm_error",
+        )
+        _LLM_CACHE[key] = result
+        return result
+
+    result = _interpret_llm_selection(raw, surface_items)
+    _LLM_CACHE[key] = result
+    return result
+
+
+def reset_llm_cache() -> None:
+    """Test helper: drop the in-memory LLM cache."""
+    _LLM_CACHE.clear()
+
+
+def llm_cache_size() -> int:
+    """Test helper: current cache entry count."""
+    return len(_LLM_CACHE)

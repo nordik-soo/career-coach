@@ -23,7 +23,10 @@ from skillbridge.chat.conversation_frame import SurfaceItem
 from skillbridge.chat.reference_resolver import (
     ResolveOutcome,
     build_clarification_prompt,
+    llm_cache_size,
+    reset_llm_cache,
     resolve_reference,
+    resolve_reference_via_llm,
 )
 
 
@@ -393,4 +396,365 @@ class TestClarificationPromptRendering:
         prompt = build_clarification_prompt(jobs)
         assert prompt == (
             "Which one do you mean — Truck driver or Delivery driver?"
+        )
+
+
+# ---------------------------------------------------------------- LLM fallback (Step 2.3)
+
+
+class TestLLMFallbackDefensive:
+    """Defensive short-circuits — none of these should hit the LLM."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def test_empty_surface_returns_no_reference_without_llm_call(
+        self, monkeypatch,
+    ):
+        def _fail(*a, **k):
+            raise AssertionError("LLM should not be called on empty surface")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fail,
+        )
+        out = resolve_reference_via_llm(message="anything", surface_items=())
+        assert out.status == "no_reference"
+        assert out.reason == "no_surface"
+
+    def test_empty_message_returns_no_reference_without_llm_call(
+        self, monkeypatch,
+    ):
+        def _fail(*a, **k):
+            raise AssertionError("LLM should not be called on empty message")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fail,
+        )
+        out = resolve_reference_via_llm(
+            message="   ", surface_items=_TWO_ROLES,
+        )
+        assert out.status == "no_reference"
+        assert out.reason == "empty_message"
+
+    @pytest.mark.parametrize("bad", [None, 123, ["not a string"]])
+    def test_non_string_returns_no_reference_without_llm_call(
+        self, bad, monkeypatch,
+    ):
+        def _fail(*a, **k):
+            raise AssertionError("LLM should not be called on non-string")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fail,
+        )
+        out = resolve_reference_via_llm(
+            message=bad, surface_items=_TWO_ROLES,
+        )
+        assert out.status == "no_reference"
+        assert out.reason == "non_string_message"
+
+    def test_llm_disabled_returns_no_reference_without_llm_call(
+        self, monkeypatch,
+    ):
+        def _fail(*a, **k):
+            raise AssertionError("LLM should not be called when disabled")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fail,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", False,
+        )
+        out = resolve_reference_via_llm(
+            message="admin secretary", surface_items=_TWO_ROLES,
+        )
+        assert out.status == "no_reference"
+        assert out.reason == "llm_disabled"
+
+
+class TestLLMFallbackSelectionInterpretation:
+    """LLM returned a valid selection — verify each enum value maps
+    correctly back to a ResolveOutcome."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def _stub_returning(self, monkeypatch, value: str):
+        def _fake(*a, **k):
+            return value
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fake,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+
+    def test_item_1_resolves_to_first_item(self, monkeypatch):
+        self._stub_returning(monkeypatch, "item_1")
+        out = resolve_reference_via_llm(
+            message="admin", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "resolved"
+        assert out.item is _THREE_ROLES[0]
+        assert out.reason == "llm_selected"
+
+    def test_item_2_resolves_to_second_item(self, monkeypatch):
+        self._stub_returning(monkeypatch, "item_2")
+        out = resolve_reference_via_llm(
+            message="accounting stuff", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "resolved"
+        assert out.item is _THREE_ROLES[1]
+
+    def test_item_n_at_edge_of_surface(self, monkeypatch):
+        self._stub_returning(monkeypatch, "item_3")
+        out = resolve_reference_via_llm(
+            message="data entry work", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "resolved"
+        assert out.item is _THREE_ROLES[2]
+
+    def test_clarification_maps_to_clarification_status(self, monkeypatch):
+        self._stub_returning(monkeypatch, "clarification")
+        out = resolve_reference_via_llm(
+            message="admin", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "clarification"
+        assert out.item is None
+        assert out.reason == "llm_clarification"
+
+    def test_no_match_maps_to_no_reference(self, monkeypatch):
+        self._stub_returning(monkeypatch, "no_match")
+        out = resolve_reference_via_llm(
+            message="tell me about the weather", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "no_reference"
+        assert out.item is None
+        assert out.reason == "llm_no_match"
+
+    def test_out_of_range_item_coerces_to_no_reference(self, monkeypatch):
+        """Defensive: LLM returned item_5 but surface has only 3 items."""
+        self._stub_returning(monkeypatch, "item_5")
+        out = resolve_reference_via_llm(
+            message="fifth?", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "no_reference"
+        assert out.reason == "llm_out_of_range"
+
+    def test_unknown_selection_coerces_to_no_reference(self, monkeypatch):
+        """Defensive: schema constrains the enum, but if the model
+        somehow returns junk (never enforced client-side), coerce to
+        no_reference rather than crash."""
+        self._stub_returning(monkeypatch, "some_garbage_value")
+        out = resolve_reference_via_llm(
+            message="?", surface_items=_THREE_ROLES,
+        )
+        assert out.status == "no_reference"
+        assert out.reason == "llm_invalid"
+
+
+class TestLLMFallbackExceptions:
+    """Failure modes — API errors, exceptions, etc."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def test_llm_exception_returns_no_reference(self, monkeypatch):
+        def _boom(*a, **k):
+            raise RuntimeError("simulated API failure")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _boom,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        out = resolve_reference_via_llm(
+            message="admin secretary", surface_items=_TWO_ROLES,
+        )
+        assert out.status == "no_reference"
+        assert out.reason == "llm_error"
+
+    def test_llm_error_is_cached_to_prevent_retry_storms(self, monkeypatch):
+        """Match the intent classifier's behavior: cache the failure
+        result. Prevents retry storms on a permanently broken LLM."""
+        call_count = {"n": 0}
+        def _boom(*a, **k):
+            call_count["n"] += 1
+            raise RuntimeError("simulated API failure")
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _boom,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        out1 = resolve_reference_via_llm(
+            message="admin secretary", surface_items=_TWO_ROLES,
+        )
+        out2 = resolve_reference_via_llm(
+            message="admin secretary", surface_items=_TWO_ROLES,
+        )
+        assert call_count["n"] == 1, "second call should hit the cache"
+        assert out1 == out2
+
+
+class TestLLMFallbackCaching:
+    """Cache identity discipline: full-identity key catches surface
+    changes; message normalization catches trivial whitespace/case
+    variation."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def test_cache_hit_avoids_second_llm_call(self, monkeypatch):
+        call_count = {"n": 0}
+        def _fake(*a, **k):
+            call_count["n"] += 1
+            return "item_1"
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fake,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        _ = resolve_reference_via_llm(
+            message="admin secretary", surface_items=_TWO_ROLES,
+        )
+        _ = resolve_reference_via_llm(
+            message="admin secretary", surface_items=_TWO_ROLES,
+        )
+        assert call_count["n"] == 1
+        assert llm_cache_size() == 1
+
+    def test_message_normalization_strips_and_lowers_in_cache_key(
+        self, monkeypatch,
+    ):
+        """Same message with different whitespace / case hits the cache."""
+        call_count = {"n": 0}
+        def _fake(*a, **k):
+            call_count["n"] += 1
+            return "item_1"
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fake,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        _ = resolve_reference_via_llm(
+            message="admin secretary", surface_items=_TWO_ROLES,
+        )
+        _ = resolve_reference_via_llm(
+            message="  Admin SECRETARY  ", surface_items=_TWO_ROLES,
+        )
+        assert call_count["n"] == 1
+
+    def test_different_surface_kind_gets_distinct_cache_entry(
+        self, monkeypatch,
+    ):
+        """Full-identity key: same label but different kind
+        (role vs job) must not share a cache entry."""
+        call_count = {"n": 0}
+        def _fake(*a, **k):
+            call_count["n"] += 1
+            return "item_1"
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fake,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        roles = (_role("Data entry clerk", "14400", 1),)
+        jobs = (_job("Data entry clerk", "j1", 1),)
+        _ = resolve_reference_via_llm(
+            message="that one", surface_items=roles,
+        )
+        _ = resolve_reference_via_llm(
+            message="that one", surface_items=jobs,
+        )
+        assert call_count["n"] == 2, (
+            "kind change (role vs job) must produce distinct cache entries "
+            "even when labels match"
+        )
+        assert llm_cache_size() == 2
+
+    def test_different_surface_id_gets_distinct_cache_entry(
+        self, monkeypatch,
+    ):
+        """Full-identity key: same label and kind but different id
+        (different NOC) must not share a cache entry."""
+        call_count = {"n": 0}
+        def _fake(*a, **k):
+            call_count["n"] += 1
+            return "item_1"
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fake,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        surface_a = (_role("Bookkeeper", "12200", 1),)
+        surface_b = (_role("Bookkeeper", "12201", 1),)
+        _ = resolve_reference_via_llm(
+            message="that one", surface_items=surface_a,
+        )
+        _ = resolve_reference_via_llm(
+            message="that one", surface_items=surface_b,
+        )
+        assert call_count["n"] == 2
+        assert llm_cache_size() == 2
+
+    def test_surface_order_change_gets_distinct_cache_entry(
+        self, monkeypatch,
+    ):
+        """Reordering items renumbers the enum (item_1 now points to a
+        different item), so ordering must be part of the cache key."""
+        call_count = {"n": 0}
+        def _fake(*a, **k):
+            call_count["n"] += 1
+            return "item_1"
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fake,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        forward = _TWO_ROLES
+        reversed_ = tuple(reversed(_TWO_ROLES))
+        _ = resolve_reference_via_llm(
+            message="the first", surface_items=forward,
+        )
+        _ = resolve_reference_via_llm(
+            message="the first", surface_items=reversed_,
+        )
+        assert call_count["n"] == 2
+
+
+class TestLLMFallbackNoLabelNormalization:
+    """Locked: labels/ids pass through untouched (no lowercasing,
+    no stripping) so malformed surfaces stay visible."""
+
+    def setup_method(self):
+        reset_llm_cache()
+
+    def test_label_whitespace_change_is_distinct_cache_entry(
+        self, monkeypatch,
+    ):
+        """A label with trailing whitespace vs one without produces
+        different cache entries — malformed surfaces must not be
+        silently normalized away."""
+        call_count = {"n": 0}
+        def _fake(*a, **k):
+            call_count["n"] += 1
+            return "item_1"
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver._call_reference_llm", _fake,
+        )
+        monkeypatch.setattr(
+            "skillbridge.chat.reference_resolver.LLM_ENABLED", True,
+        )
+        clean = (_role("Bookkeeper", "12200", 1),)
+        dirty = (_role("Bookkeeper ", "12200", 1),)  # trailing space
+        _ = resolve_reference_via_llm(
+            message="that one", surface_items=clean,
+        )
+        _ = resolve_reference_via_llm(
+            message="that one", surface_items=dirty,
+        )
+        assert call_count["n"] == 2, (
+            "labels are not normalized in the cache key; a malformed "
+            "label should not collide with its clean equivalent"
         )
