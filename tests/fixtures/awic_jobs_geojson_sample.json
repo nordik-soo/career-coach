@@ -1,0 +1,139 @@
+{
+  "_fixture_note": "Curated subset of AWIC live GeoJSON. Real records captured from https://awic.ca/wp-json/wedatatools/v1/get-jobs-geojson on 2026-07-04. Each feature carries properties._provenance (real|synthetic) and properties._test_case naming the case it exercises. The synthetic missing-coords case is required because the live feed did not contain a missing-coords example at capture time.",
+  "data": {
+    "type": "FeatureCollection",
+    "crs": {
+      "type": "name",
+      "properties": {
+        "name": "urn:ogc:def:crs:OGC:1.3:CRS84"
+      }
+    },
+    "features": [
+      {
+        "type": "Feature",
+        "properties": {
+          "url": "https://sah.on.ca/careers/occupational-therapist-allied-health-full-time-7/",
+          "email": null,
+          "hash": "d2c47a856e6da1ca99f20032e1c870a5",
+          "post_id": 8301829,
+          "job_title": "Occupational Therapist- Allied Health- Full Time (4)",
+          "experience": -1,
+          "type": "FT",
+          "duration": "permanent",
+          "nocs": [
+            "3143"
+          ],
+          "nocs_2021": [
+            "31203"
+          ],
+          "employer": "Sault Area Hospital Foundation",
+          "employer_slug": "sault-area-hospital-foundation",
+          "employer_id": 640337,
+          "excerpt": "Reporting to the Manager of Allied Health, the successful candidate will provide assessment, program planning, treatment, follow-up and program evaluation to both inpatients and outpatients following practice standards set by the College of Occupational Therapists of Ontario. Successful applicants will join a large team of experienced Occupational Therapists and have",
+          "_provenance": "real",
+          "_test_case": "real_ssm_valid_noc"
+        },
+        "geometry": {
+          "type": "Point",
+          "coordinates": [
+            -84.319367,
+            46.5483163
+          ]
+        }
+      },
+      {
+        "type": "Feature",
+        "properties": {
+          "url": "http://www.wawarehc.com/job/tow-truck-operator-mission-motors-wawa",
+          "email": null,
+          "hash": "8b46c95cf39cca2b6c66730ec2f44a00",
+          "post_id": 8827928,
+          "job_title": "Tow Truck Operator",
+          "experience": -1,
+          "type": "casual",
+          "duration": "permanent",
+          "nocs": [
+            "7511"
+          ],
+          "nocs_2021": [
+            "73300"
+          ],
+          "job_tags": [
+            "trades"
+          ],
+          "employer": "Mission Motors",
+          "employer_slug": "mission-motors",
+          "employer_id": 637878,
+          "excerpt": "NOW HIRING: Tow Truck Operator - Mission Motors of Wawa is seeking a reliable and motivated Tow Truck Operator to join our team This role involves providing roadside assistance, towing services, and ensuring safe transport of vehicles while delivering excellent customer service Location: 61 Mission Rd, Wawa ON Compensation: $50",
+          "_provenance": "real",
+          "_test_case": "real_outside_ssm"
+        },
+        "geometry": {
+          "type": "Point",
+          "coordinates": [
+            -84.784403,
+            47.994282
+          ]
+        }
+      },
+      {
+        "type": "Feature",
+        "properties": {
+          "url": "https://sah.on.ca/careers/pathologists-assistant-laboratory-full-time-2/",
+          "email": null,
+          "hash": "44cb842fc475d589d0d7136464f876b2",
+          "post_id": 8705234,
+          "job_title": "Pathologists’ Assistant- Laboratory- Full Time (2)",
+          "experience": -1,
+          "type": "FT",
+          "duration": "permanent",
+          "job_tags": [
+            "post-graduate-degree-or-certificate"
+          ],
+          "employer": "Sault Area Hospital Foundation",
+          "employer_slug": "sault-area-hospital-foundation",
+          "employer_id": 640337,
+          "excerpt": "PURPOSE OF POSITION: To perform the full scope of pathologist assistant practice (surgical pathology and autopsy pathology) under the direction and supervision of medically qualified pathologists. DUTIES AND RESPONSIBILITIES: Perform high-quality macroscopic (gross) examination and dissection of simple to complex surgical pathology specimens and the related tasks arising within this",
+          "_provenance": "real",
+          "_test_case": "real_ssm_invalid_noc"
+        },
+        "geometry": {
+          "type": "Point",
+          "coordinates": [
+            -84.319367,
+            46.5483163
+          ]
+        }
+      },
+      {
+        "type": "Feature",
+        "properties": {
+          "url": "https://example.invalid/synthetic/missing-coords",
+          "email": null,
+          "hash": "synthetic_hash_no_coords",
+          "post_id": 99999901,
+          "job_title": "SYNTHETIC missing-coordinates specimen",
+          "experience": -1,
+          "type": "FT",
+          "duration": "permanent",
+          "nocs": [
+            "3143"
+          ],
+          "nocs_2021": [
+            "31203"
+          ],
+          "employer": "Sault Area Hospital Foundation",
+          "employer_slug": "sault-area-hospital-foundation",
+          "employer_id": 640337,
+          "excerpt": "Synthetic specimen for missing-coordinates test path. Not from live AWIC feed.",
+          "_provenance": "synthetic",
+          "_test_case": "synth_missing_coords"
+        },
+        "geometry": {
+          "type": "Point",
+          "coordinates": null
+        }
+      }
+    ]
+  }
+}

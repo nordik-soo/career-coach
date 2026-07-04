@@ -231,6 +231,14 @@ REGION_NAME = os.getenv("REGION_NAME", "Sault Ste. Marie")
 REGION_FSAS = _list("REGION_FSAS", "P6A,P6B,P6C,P0R,P0S,P5A")
 LOCAL_CITIES = {c.lower() for c in _list("LOCAL_CITIES", "Sault Ste. Marie")}
 
+# SSM coordinate bounding box for geo-tagged ingest sources (v1: AWIC jobs).
+# Defaults are approximate; refinable via env vars. Coordinates are in
+# WGS84 (lng, lat) matching AWIC's GeoJSON CRS urn:ogc:def:crs:OGC:1.3:CRS84.
+SSM_BBOX_LAT_MIN = float(os.getenv("SSM_BBOX_LAT_MIN", "46.4"))
+SSM_BBOX_LAT_MAX = float(os.getenv("SSM_BBOX_LAT_MAX", "46.6"))
+SSM_BBOX_LNG_MIN = float(os.getenv("SSM_BBOX_LNG_MIN", "-84.5"))
+SSM_BBOX_LNG_MAX = float(os.getenv("SSM_BBOX_LNG_MAX", "-84.2"))
+
 
 # -------------------------------------------------------------------- Pipeline
 PIPELINE_DAILY_HOUR_ET = _int("PIPELINE_DAILY_HOUR_ET", 6)
@@ -260,6 +268,25 @@ JOB_SOURCES: list[SourceConfig] = [
         url=os.getenv("SCCC_FEED_URL", ""),
         api_key=os.getenv("SCCC_API_KEY", ""),
         extra={"format": os.getenv("SCCC_FEED_FORMAT", "wp_rest")},
+    ),
+    SourceConfig(
+        name="awic_jobs",
+        # AWIC jobs are a primary source — registered, not toggled.
+        # The connector points at AWIC's public GeoJSON REST endpoint
+        # by default and always runs. SEPARATE flag from AWIC labour-
+        # market reports (AWIC_ENABLED) on purpose: jobs and reports
+        # do not share a feature flag.
+        #
+        # Provenance policy: AWIC is a local aggregator. Some postings'
+        # properties.url values point to third-party sources including
+        # Job Bank. SkillBridge ingests AWIC's curated metadata layer
+        # ONLY, not the third-party sources. Source is stamped as
+        # 'awic_jobs'; the third-party URL is stored as the apply-URL.
+        # See sql/schema.sql (core.approved_job_source description for
+        # awic_jobs) and BREAKING.md for the durable provenance rule.
+        enabled=_bool("AWIC_JOBS_ENABLED", True),
+        url=os.getenv("AWIC_JOBS_FEED_URL", ""),
+        extra={"format": os.getenv("AWIC_JOBS_FEED_FORMAT", "geojson")},
     ),
     SourceConfig(
         name="welcome_ssm",

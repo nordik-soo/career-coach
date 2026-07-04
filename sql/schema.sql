@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS core.approved_job_source (
 
 INSERT INTO core.approved_job_source (source, description, scope) VALUES
     ('sccc',                  'Sault Community Career Centre job board (Tier 1, intended primary)', 'partner'),
+    ('awic_jobs',             'AWIC local job aggregator GeoJSON feed (v1; Tier 1, partner). AWIC is treated as a local aggregator: some postings'' properties.url values point to third-party sources including Job Bank. SkillBridge ingests AWIC''s curated metadata layer only, NOT Job Bank directly. Provenance is source=awic_jobs; the third-party URL is stored as the apply-URL only. See BREAKING.md.', 'partner'),
     ('welcome_ssm',           'Welcome to SSM Careers (Tier 1, partner)',                            'partner'),
     ('city_ssm',              'City of SSM feed (partner-sanctioned, when available)',               'partner'),
     ('partner_csv',           'Partner CSV upload bridge (unknown / fallback partner)',              'bridge'),
