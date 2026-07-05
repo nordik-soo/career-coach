@@ -270,6 +270,17 @@ def _build_user_block(
     parts.append(f"USER_MESSAGE:\n{inp.user_message}\n")
     parts.append(f"NEXT_ACTION: {d.action}")
     parts.append(f"ROLE_CATEGORY: {role_category}")
+    # 2026-07-05: NEXT_ACTION_RESPONDER_PROMPT's conditional close for
+    # ACTION_PRESENT_RESUME_FACTS branches on TARGET_ROLE being present.
+    # Without emitting it here, the LLM never sees the field it's told to
+    # check and always defaults to the "TARGET_ROLE missing -> ask what
+    # kind of work" branch even for users who already stated a target
+    # 1-2 turns earlier. Mirrors _build_user_block_v2 (line 1460-1461)
+    # and _build_user_block_for_tiered_matches (line 3078-3079) which
+    # already emit this field. Pinned by
+    # tests/test_resume_confirm_removal.py::test_build_user_block_*.
+    if inp.target_role_text:
+        parts.append(f"TARGET_ROLE: {inp.target_role_text}")
     if d.redirect_reason:
         parts.append(f"REDIRECT_REASON: {d.redirect_reason}")
 

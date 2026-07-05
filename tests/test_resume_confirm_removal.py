@@ -276,3 +276,142 @@ def test_active_prompt_next_action_responder_explicitly_forbids_old_phrases():
     assert "anything I missed" in normalized
     # And the framing is negative ("NEVER end with").
     assert "NEVER end with" in NEXT_ACTION_RESPONDER_PROMPT
+
+
+# ===========================================================================
+# TARGET_ROLE prompt/user-block contract (2026-07-05 fix):
+#
+# The ACTIVE prompt used by compose_reply for ACTION_PRESENT_RESUME_FACTS
+# is NEXT_ACTION_RESPONDER_PROMPT. Its conditional close depends on
+# whether TARGET_ROLE appears in the user block sent alongside the prompt.
+#
+# Before the 2026-07-05 fix, _build_user_block() did not serialize
+# TARGET_ROLE into the block. The LLM was told "if TARGET_ROLE is set,
+# no question" but never received the field to check -- so it always
+# fell into the "TARGET_ROLE missing/empty -> ask what kind of work"
+# branch even for users who had already stated their target 1-2 turns
+# earlier, and made the resume-review turn feel like a state reset.
+#
+# The existing tests in this file cover the deterministic fallback and
+# the prompt text; they do NOT verify the user block content. These
+# tests close that gap.
+# ===========================================================================
+
+
+def _make_resume_review_decision():
+    """Build the Decision object that handler.py:6048 constructs on a
+    resume-upload turn: STATE_RESUME_REVIEW + ACTION_PRESENT_RESUME_FACTS
+    with show_matches=False (no engine results to render on this turn)."""
+    from skillbridge.chat import intake_state
+    return intake_state.Decision(
+        next_state=intake_state.STATE_RESUME_REVIEW,
+        action=intake_state.ACTION_PRESENT_RESUME_FACTS,
+        ask_slots=[],
+        show_matches=False,
+    )
+
+
+def _make_responder_input(target_role_text=None):
+    """Build a minimal ResponderInput mirroring the resume-review call
+    site at handler.py:6056-6066. Only fields _build_user_block actually
+    reads on this path are non-default."""
+    from skillbridge.chat.responder import ResponderInput
+    return ResponderInput(
+        user_message="",
+        decision=_make_resume_review_decision(),
+        results=[],
+        training_by_job={},
+        next_skill=(None, 0),
+        band_signal="none",
+        requires_consent=True,
+        target_role_text=target_role_text,
+        resume_facts={
+            "work_history": [
+                {"title": "Registered Nurse", "employer": "SAH",
+                 "start_year": 2020, "is_current": True},
+            ],
+            "skills": [{"name": "patient assessment"}],
+        },
+    )
+
+
+def test_build_user_block_emits_target_role_when_set_on_resume_review():
+    """The 2026-07-05 fix: when the resume-upload path calls compose_reply
+    with target_role_text set, _build_user_block MUST include a
+    'TARGET_ROLE: <text>' line in the block sent to the LLM.
+
+    Without this, the LLM's conditional close in NEXT_ACTION_RESPONDER_PROMPT
+    ('if TARGET_ROLE is set -> no question') never fires because the
+    field it checks is never in the block."""
+    from skillbridge.chat.responder import (
+        _build_user_block,
+        build_sanitized_responder_view_v1,
+    )
+    inp = _make_responder_input(target_role_text="acute care nursing")
+    view = build_sanitized_responder_view_v1(inp)
+    block = _build_user_block(inp, view)
+    assert "TARGET_ROLE: acute care nursing" in block, (
+        "_build_user_block did not emit TARGET_ROLE for a resume-review "
+        "turn with target set. This is the exact prompt/block wire gap "
+        f"that caused the 2026-07-05 bug. Block was:\n{block}"
+    )
+
+
+def test_build_user_block_omits_target_role_when_missing_on_resume_review():
+    """Mirror: when target_role_text is None, no TARGET_ROLE line is
+    emitted. This preserves the prompt's 'missing/empty -> ask what
+    kind of work' branch and prevents anyone from later 'fixing' the
+    emit to unconditionally include the label with an empty value
+    (which would suppress the coaching question incorrectly)."""
+    from skillbridge.chat.responder import (
+        _build_user_block,
+        build_sanitized_responder_view_v1,
+    )
+    inp = _make_responder_input(target_role_text=None)
+    view = build_sanitized_responder_view_v1(inp)
+    block = _build_user_block(inp, view)
+    assert "TARGET_ROLE" not in block, (
+        "_build_user_block emitted TARGET_ROLE with no target set; the "
+        "prompt's 'missing/empty -> ask what kind of work' branch relies "
+        f"on the label being absent. Block was:\n{block}"
+    )
+
+
+def test_prompt_block_contract_target_role_referenced_by_prompt_is_emitted_by_block():
+    """Narrow contract lock: as long as NEXT_ACTION_RESPONDER_PROMPT
+    (the ACTIVE prompt for resume-review turns) references TARGET_ROLE
+    in its conditional close, _build_user_block MUST emit TARGET_ROLE
+    when the input has it set.
+
+    This is deliberately scoped to the ONE prompt/block pair that this
+    bug lived in, not a generic prompt-parser framework. The invariant
+    is: prompt-says-check-X must imply block-emits-X. If the prompt is
+    ever rewritten to no longer reference TARGET_ROLE, the first
+    assertion here fails loudly and a future editor can remove or
+    refit this test."""
+    from skillbridge.chat.prompts import NEXT_ACTION_RESPONDER_PROMPT
+    from skillbridge.chat.responder import (
+        _build_user_block,
+        build_sanitized_responder_view_v1,
+    )
+    # Prompt side: as long as TARGET_ROLE is referenced in the active
+    # prompt, the block-side invariant applies.
+    prompt_normalized = " ".join(NEXT_ACTION_RESPONDER_PROMPT.split())
+    assert "TARGET_ROLE" in prompt_normalized, (
+        "NEXT_ACTION_RESPONDER_PROMPT no longer references TARGET_ROLE. "
+        "If the conditional close was intentionally removed, this "
+        "contract test should be removed or updated. If it was removed "
+        "by accident, the prompt/block invariant is broken."
+    )
+    # Block side: since the prompt references TARGET_ROLE, the block
+    # sent to the LLM must contain it when the input has it set.
+    inp = _make_responder_input(target_role_text="acute care nursing")
+    view = build_sanitized_responder_view_v1(inp)
+    block = _build_user_block(inp, view)
+    assert "TARGET_ROLE: acute care nursing" in block, (
+        "The active prompt references TARGET_ROLE (verified above), but "
+        "_build_user_block did not emit it. This is the exact prompt/"
+        "block wire gap that caused the resume-upload responder to "
+        "ask 'What kind of work are you looking for?' after the user "
+        f"had already stated their target. Block was:\n{block}"
+    )
