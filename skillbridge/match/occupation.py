@@ -12,9 +12,11 @@ Lookup strategy (in order, first hit wins):
      "front desk agent" vs "front desk agents".
 
 When nothing reaches the threshold, returns None. Callers must treat
-None as "no occupation signal" and fall back to the existing title-
-token similarity boost (`_target_role_boost` in engine.py). Step 2 is
-additive; it never overrides the legacy path.
+None as "no occupation signal". (Step 2 cutover 2026-07-16:
+`_target_role_boost` was retired — the title-token similarity boost
+that this resolver's None branch used to fall back to no longer
+exists. NOC-match remains the sole occupation-relevance signal
+contributing to V1 fit.)
 
 There is no LLM fallback. We defer that until real chat exposes a
 title we can't resolve with the OaSIS lexicon -- premature LLM calls

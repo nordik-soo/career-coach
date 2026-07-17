@@ -254,7 +254,7 @@ def test_user_block_serializes_full_score_explanation():
     assert sc["skill_base"]["mode"] == "required_only"
     assert sc["skill_base"]["value"] == 0.667
     assert "boosts" in sc
-    assert "title_match" in sc
+    # title_match sub-dict retired in Step 2 cutover 2026-07-16.
     assert sc["score_pre_caps"] == 0.807
     assert sc["score_post_caps"] == 0.41
 

@@ -360,36 +360,25 @@ def _run_engine_for_case(case: Case) -> RunOutcome:
     # code-consistent, not a made-up heuristic.
     #
     # Step 6d (2026-07-02) added title-match-override as a third
-    # source of substantive evidence. The engine's title-match fast
-    # path (engine.py:1509-1511) floors the score at band_stretch
-    # when title similarity >= threshold, and the flag surfaces in
-    # score_explanation.title_match_override (engine.py:1582). The
-    # F4 archetype (c_exact_title_zero_skills) intentionally has
-    # zero skills + zero experience but types the posting's exact
-    # title -- expected behaviour is the title match surfaces the
-    # posting, capped by no_experience. Without this signal our
-    # substantive_evidence check would short-circuit to UNDETERMINED
-    # before diagnose() ever considers the surfaced posting.
+    # source of substantive evidence. Step 2 (2026-07-16) retired
+    # the title-match-override signal entirely — title similarity no
+    # longer surfaces postings or affects fit. The
+    # c_exact_title_zero_skills case that relied on the override now
+    # correctly fails the substantive_evidence check.
     #
     # Rule: at least one NON-CREDENTIAL skill OR non-empty
-    # experience_text OR an engine-emitted title_match_override on
-    # any surfaced posting is required to consider the profile
-    # usable/enough. WHMIS + first aid alone (no title match, no
-    # work history) is thin evidence, not scoreable evidence.
+    # experience_text is required to consider the profile
+    # usable/enough. WHMIS + first aid alone (no work history) is
+    # thin evidence, not scoreable evidence.
     has_non_credential_skill = any(
         not is_credential_skill_name(phrase)
         for phrase in case.profile.skill_phrases
         if phrase
     )
     has_experience = bool(case.profile.experience_text)
-    has_title_match_override = any(
-        bool((m.score_explanation or {}).get("title_match_override"))
-        for m in matches
-    )
     substantive_evidence = (
         has_non_credential_skill
         or has_experience
-        or has_title_match_override
     )
 
     enough_to_match = (

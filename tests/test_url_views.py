@@ -57,7 +57,6 @@ from skillbridge.chat.url_views import (
     ScoreComponentsView,
     ScoreExplanationView,
     SkillBaseView,
-    TitleMatchView,
     TrainingView,
     _enumerate_url_occurrence,
     _project_cap_flag,
@@ -180,10 +179,9 @@ def test_sanitized_url_is_frozen():
         preferred_match_ratio=0.5, preferred_weight=0.2,
     )),
     (BoostsView, dict(
-        location=0.1, recency=0.0, target_role=0.0, target_noc_match=0.0,
+        recency=0.0, target_noc_match=0.0,
         work_type_fit=0.0, shift_fit=0.0,
     )),
-    (TitleMatchView, dict(applied=True, raw_similarity=0.8)),
     (FallbackAdjacentRecommendationView, dict(
         title="T", employer=None, evidence_summary=None,
     )),
@@ -465,8 +463,6 @@ def test_score_explanation_view_full_field_population():
         "required_total": 2,
         "preferred_match_ratio": 0.7,
         "preferred_total": 3,
-        "title_match_similarity": 0.82,
-        "title_match_override": False,
         "recency_days": 10,
         "work_type_fit": "matched",
         "shift_fit": "no_signal",
@@ -484,11 +480,10 @@ def test_score_explanation_view_full_field_population():
                 "preferred_match_ratio": 0.7, "preferred_weight": 0.2,
             },
             "boosts": {
-                "recency": 0.0, "target_role": 0.1,
+                "recency": 0.0,
                 "target_noc_match": 0.0, "work_type_fit": 0.02,
                 "shift_fit": 0.0,
             },
-            "title_match": {"applied": False, "raw_similarity": 0.82},
             "score_pre_caps": 0.77,
             "score_post_caps": 0.65,
         },
@@ -503,8 +498,6 @@ def test_score_explanation_view_full_field_population():
     assert view.required_match_ratio == 0.5
     assert view.required_total == 2
     assert view.preferred_total == 3
-    assert view.title_match_similarity == 0.82
-    assert view.title_match_override is False
     assert view.recency_days == 10
     assert view.work_type_fit == "matched"
     assert view.shift_fit == "no_signal"
@@ -524,9 +517,8 @@ def test_score_explanation_view_full_field_population():
     assert view.score_components.skill_base.value == 0.6
     assert view.score_components.skill_base.mode == "blend"
     assert isinstance(view.score_components.boosts, BoostsView)
-    assert view.score_components.boosts.target_role == 0.1
-    assert isinstance(view.score_components.title_match, TitleMatchView)
-    assert view.score_components.title_match.applied is False
+    assert view.score_components.boosts.recency == 0.0
+    # title_match sub-dict retired in Step 2 cutover 2026-07-16.
 
 
 def test_score_explanation_view_absent_caps_are_none():

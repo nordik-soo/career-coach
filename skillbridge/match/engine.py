@@ -36,8 +36,6 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Iterable, NamedTuple
 
-from rapidfuzz import fuzz
-
 from config import (
     EMBEDDING_MODEL_VERSION,
     MATCH,
@@ -987,17 +985,6 @@ def _skills_overlap(user_name: str, job_name: str) -> bool:
     return len(overlap) / len(j_tokens) >= _SKILL_TOKEN_OVERLAP_THRESHOLD
 
 
-def _target_role_boost(title: str, target_role: str | None) -> float:
-    if not target_role:
-        return 0.0
-    sim = _target_role_similarity(title, target_role)
-    if sim >= 80:
-        return 0.05
-    if sim >= 60:
-        return 0.02
-    return 0.0
-
-
 def _target_noc_boost(job_noc: str | None, user_noc: str | None) -> float:
     """+_TARGET_NOC_BOOST when both sides resolve to the same NOC code.
 
@@ -1019,26 +1006,10 @@ def _target_noc_boost(job_noc: str | None, user_noc: str | None) -> float:
     return _TARGET_NOC_BOOST if job_noc == user_noc else 0.0
 
 
-def _target_role_similarity(title: str | None, target_role: str | None) -> float:
-    if not title or not target_role:
-        return 0.0
-    return float(fuzz.token_set_ratio(title.lower(), target_role.lower()))
-
-
-def _direct_title_match_score(title: str | None, target_role: str | None) -> float | None:
-    """Return a displayable score for a near-exact title request.
-
-    Skill extraction is allowed to be incomplete. If a user types a specific
-    SCCC title and that title exists in the current-job view, the system must
-    show the posting instead of saying "no matches" merely because the job has
-    fewer than the configured extracted skills.
-    """
-    sim = _target_role_similarity(title, target_role)
-    if sim >= 92:
-        return max(MATCH.band_good + 0.01, 0.61)
-    if sim >= 82:
-        return MATCH.band_stretch + 0.01
-    return None
+# Step 2 cutover 2026-07-16: `_target_role_similarity` and
+# `_direct_title_match_score` retired. Title similarity is not measured
+# by the V1 scoring path. A future retrieval layer may introduce it as
+# retrieval relevance, but it cannot affect qualification fit.
 
 
 # --------------------------------- PR 10: work_type_fit + shift_fit ----
@@ -1149,212 +1120,6 @@ def _score_one_job(
     skill_alignment_list: list[SkillAlignment] = []
     required = _filter_eligible_skills(job_skills)
     if len(required) < MATCH.min_required_skills_for_eligibility:
-        direct_score = _direct_title_match_score(
-            job.get("title"),
-            profile.get("target_role_text"),
-        )
-        if direct_score is not None:
-            cred = _regulated(job.get("noc_code"), profile.get("target_role_text"))
-            credential_warning = None
-            if cred:
-                credential_warning = (
-                    f"This occupation may require Canadian/Ontario licensing or certification "
-                    f"({cred['regulator_name']}). {cred.get('licensing_note') or ''}"
-                ).strip()
-
-            # Compute matched / missing the same way the eligible-job
-            # branch does. Even though the JOB has too few extracted
-            # skills to be ranked by skills alone, the user may still
-            # have some of those skills — saying "missing: [all of them]"
-            # when the user actually has welding (or whatever) on their
-            # resume is a misleading "because" clause for the responder.
-            tm_matched: list[dict] = []
-            tm_missing: list[dict] = []
-            tm_matched_req: list[dict] = []
-            tm_missing_req: list[dict] = []
-            tm_matched_pref: list[dict] = []
-            tm_missing_pref: list[dict] = []
-            tm_match_strength: dict[str, float] = {}
-            tm_match_stage: dict[str, str] = {}
-            tm_alignments, tm_classifications = build_skill_alignment(
-                required,
-                user_rows,
-                user_skill_ids,
-                user_skill_names,
-                user_skill_names_canon,
-                user_embeddings_matrix=user_embeddings_matrix,
-                job_skill_embeddings=job_skill_embeddings,
-            )
-            skill_alignment_list.extend(tm_alignments)
-            for c in tm_classifications:
-                s = c.skill
-                key = (s.get("skill_name") or "").lower()
-                bucket = _required_or_preferred(s)
-                if c.strength > 0:
-                    tm_matched.append(s)
-                    # max-wins on lowercase collision (same rule as the
-                    # main eligible path).
-                    prev = tm_match_strength.get(key, 0.0)
-                    if c.strength > prev:
-                        tm_match_strength[key] = c.strength
-                        tm_match_stage[key] = c.stage
-                    (tm_matched_req if bucket == "required" else tm_matched_pref).append(s)
-                else:
-                    tm_missing.append(s)
-                    (tm_missing_req if bucket == "required" else tm_missing_pref).append(s)
-            tm_total_req = len(tm_matched_req) + len(tm_missing_req)
-            tm_total_pref = len(tm_matched_pref) + len(tm_missing_pref)
-            tm_matched_req_strength = sum(
-                tm_match_strength.get((s.get("skill_name") or "").lower(), 0.0)
-                for s in tm_matched_req
-            )
-            tm_matched_pref_strength = sum(
-                tm_match_strength.get((s.get("skill_name") or "").lower(), 0.0)
-                for s in tm_matched_pref
-            )
-            tm_base, tm_req_ratio, tm_pref_ratio = _weighted_skill_base(
-                tm_matched_req_strength, tm_total_req,
-                tm_matched_pref_strength, tm_total_pref,
-            )
-
-            # Build a score_explanation for the direct-title-match early
-            # return, mirroring the eligible-job path's shape. The
-            # responder needs the same "why" payload for these matches
-            # (otherwise it can't ground a "because" clause for a job we
-            # surfaced purely on title similarity).
-            target_role = profile.get("target_role_text")
-            title_sim_pct = (
-                float(_target_role_similarity(job.get("title"), target_role))
-                if target_role else 0.0
-            )
-            posted = job.get("posted_date")
-            recency_days: int | None = (
-                max(0, (date.today() - posted).days)
-                if isinstance(posted, date) else None
-            )
-
-            score_explanation = {
-                "matched_skills": [s["skill_name"] for s in tm_matched],
-                "missing_skills": [s["skill_name"] for s in tm_missing],
-                "skill_match_ratio": (
-                    round(len(tm_matched) / len(required), 3) if required else 0.0
-                ),
-                # Required/preferred split (Sprint 5 step 3). Mirrors the
-                # main eligible-path shape so the responder doesn't have
-                # to handle two payload schemas.
-                "required_matched": [s["skill_name"] for s in tm_matched_req],
-                "required_missing": [s["skill_name"] for s in tm_missing_req],
-                # Step 4a: per-skill strength + sum, same shape as main path
-                "required_match_strengths": [
-                    round(tm_match_strength.get((s.get("skill_name") or "").lower(), 0.0), 3)
-                    for s in tm_matched_req
-                ],
-                # Step 5e: parallel stage labels (exact | fuzzy | semantic)
-                "required_match_stages": [
-                    tm_match_stage.get((s.get("skill_name") or "").lower(), "no_match")
-                    for s in tm_matched_req
-                ],
-                "required_match_strength_sum": round(tm_matched_req_strength, 3),
-                "required_match_ratio": round(tm_req_ratio, 3),
-                "required_total": tm_total_req,
-                "preferred_matched": [s["skill_name"] for s in tm_matched_pref],
-                "preferred_missing": [s["skill_name"] for s in tm_missing_pref],
-                "preferred_match_strengths": [
-                    round(tm_match_strength.get((s.get("skill_name") or "").lower(), 0.0), 3)
-                    for s in tm_matched_pref
-                ],
-                "preferred_match_stages": [
-                    tm_match_stage.get((s.get("skill_name") or "").lower(), "no_match")
-                    for s in tm_matched_pref
-                ],
-                "preferred_match_strength_sum": round(tm_matched_pref_strength, 3),
-                "preferred_match_ratio": round(tm_pref_ratio, 3),
-                "preferred_total": tm_total_pref,
-                "title_match_similarity": (
-                    round(title_sim_pct / 100.0, 3) if target_role else None
-                ),
-                "title_match_override": True,
-                "recency_days": recency_days,
-                "work_type_fit": "no_signal",
-                "shift_fit": "no_signal",
-                "credential_warning_present": bool(credential_warning),
-                # Sprint 5 step 5: structured breakdown. Mode is 'direct_title'
-                # because the score was driven by title similarity rather
-                # than the skill-base formula (the JD had too few skills
-                # for normal scoring). Boosts are all zero on this path --
-                # the direct-title score is used as-is.
-                "score_components": {
-                    "skill_base": {
-                        # Use the helper's computed base so the all-required
-                        # and all-preferred edge cases collapse correctly
-                        # (an all-required JD with full match -> 1.0, not
-                        # the weighted blend 0.8 * 1.0 + 0.2 * 0.0).
-                        "value": round(tm_base, 3),
-                        "mode": "direct_title",
-                        "required_match_ratio": round(tm_req_ratio, 3),
-                        "required_weight": _REQ_WEIGHT,
-                        "preferred_match_ratio": round(tm_pref_ratio, 3),
-                        "preferred_weight": _PREF_WEIGHT,
-                    },
-                    "boosts": {
-                        "location": 0.0,
-                        "recency": 0.0,
-                        "target_role": 0.0,
-                        "target_noc_match": 0.0,
-                        "work_type_fit": 0.0,
-                        "shift_fit": 0.0,
-                    },
-                    "title_match": {
-                        "applied": True,
-                        "raw_similarity": (
-                            round(title_sim_pct / 100.0, 3)
-                            if target_role else None
-                        ),
-                    },
-                    "score_pre_caps": round(min(1.0, direct_score), 3),
-                    "score_post_caps": round(min(1.0, direct_score), 3),
-                },
-            }
-
-            # Hard gates also apply on the direct-title surface. A user
-            # who types an exact job title should not bypass the credential
-            # cap, no-experience floor, or work-type mismatch cap just
-            # because the JD had too few extracted skills for normal
-            # scoring.
-            tm_band = _band(direct_score)
-            tm_score = min(1.0, direct_score)
-            tm_missing_names = [s["skill_name"] for s in tm_missing]
-            tm_band, tm_score = _apply_hard_gates(
-                tm_band, tm_score, tm_missing_names,
-                profile, job, score_explanation,
-            )
-            score_explanation["score_components"]["score_post_caps"] = round(tm_score, 3)
-
-            return MatchResult(
-                job_id=str(job["job_id"]),
-                profile_id=str(profile["profile_id"]),
-                title=job["title"],
-                employer=job.get("employer"),
-                url=job.get("url"),
-                location=job.get("location"),
-                match_score=round(tm_score, 3),
-                match_band=tm_band,
-                match_eligible=True,
-                ineligibility_reason=None,
-                matched_skills=[s["skill_name"] for s in tm_matched],
-                missing_skills=[s["skill_name"] for s in tm_missing],
-                matched_skill_ids=[s.get("skill_id") for s in tm_matched],
-                missing_skill_ids=[s.get("skill_id") for s in tm_missing],
-                required_skills_count=len(required),
-                credential_warning=credential_warning,
-                posted_date=job.get("posted_date"),
-                noc_code=job.get("noc_code"),
-                score_explanation=score_explanation,
-                skill_alignment=tuple(skill_alignment_list),
-                employment_type=job.get("employment_type"),
-                salary_text=job.get("salary_text"),
-            )
-
         return MatchResult(
             job_id=str(job["job_id"]),
             profile_id=str(profile["profile_id"]),
@@ -1463,44 +1228,30 @@ def _score_one_job(
     # v_current_job view now guarantees every candidate row is SSM-
     # verified — location is no longer a differentiating fit signal.)
     rec_boost = _recency_boost(job.get("posted_date"))
-    role_boost = _target_role_boost(job["title"], profile.get("target_role_text"))
-    # Step 2 occupation-match boost. Independent of role_boost (which is
-    # title-token similarity); when both fire, they stack. NOC match is
-    # the authoritative occupation signal; title-token similarity stays
-    # as the graceful fallback when the resolver has no OaSIS data.
+    # Step 2 cutover 2026-07-16: title-token similarity boost
+    # (_target_role_boost) is retired. The NOC-match boost remains
+    # as a temporary V1 boundary — NOC-to-fit behavior is unchanged
+    # by Step 2. Whether occupation-relevance signals belong in
+    # qualification fit or in retrieval-only ranking is a decision
+    # for the future MatchResultV2 design. This is known V1 behavior,
+    # not an endorsement of the V2 model.
     noc_boost = _target_noc_boost(job.get("noc_code"), profile.get("target_noc"))
     wt_fit = _work_type_fit(job.get("employment_type"),
                             profile.get("work_type_preference"))
     sh_fit = _shift_fit(job["title"], job.get("description"),
                         profile.get("shift_preference"))
-    boost = rec_boost + role_boost + noc_boost + wt_fit + sh_fit
+    boost = rec_boost + noc_boost + wt_fit + sh_fit
 
     # work_type_fit can be negative; clamp the floor to 0 so negative boosts
     # don't drop us below the skill-match base.
     score = max(0.0, min(1.0, base + boost))
 
-    # Title-match fast path. When the user named a specific role and a job's
-    # title strongly matches it, surface the posting at least at the
-    # 'stretch' band — even if we have no skill overlap yet. Otherwise a
-    # zero-skill user gets "no matches" for a job they literally typed by
-    # title, which is the worst possible answer the chat can give.
-    #
-    # The threshold (>=80 token_set_ratio) is tight enough that generic
-    # role words like "manager" alone don't trip it; the user has to
-    # match most of the title's tokens.
-    target_role = profile.get("target_role_text")
-    title_sim = 0.0
-    title_match_override = False
-    if target_role:
-        title_sim = float(fuzz.token_set_ratio(
-            (job.get("title") or "").lower(),
-            target_role.lower(),
-        ))
-        if title_sim >= 80 and score < MATCH.band_stretch:
-            # Nudge into stretch band so it shows. Use a small offset above
-            # band_stretch so the responder labels it correctly.
-            score = MATCH.band_stretch + 0.01
-            title_match_override = True
+    # Step 2 cutover 2026-07-16: the title-forced Stretch override
+    # (score = band_stretch + 0.01 whenever title fuzzy-matched the
+    # target_role) is retired. Title similarity does not affect
+    # match_score, match_band, or match_eligible. Retrieval-side
+    # title relevance is a future MatchResultV2 concern (separate
+    # retrieval surface).
 
     cred = _regulated(job.get("noc_code"), profile.get("target_role_text"))
     credential_warning = None
@@ -1570,8 +1321,6 @@ def _score_one_job(
         "preferred_match_strength_sum": round(matched_pref_strength, 3),
         "preferred_match_ratio": round(pref_ratio, 3),
         "preferred_total": total_pref,
-        "title_match_similarity": round(title_sim / 100.0, 3) if target_role else None,
-        "title_match_override": title_match_override,
         "recency_days": recency_days,
         "work_type_fit": (
             "matched" if wt_fit > 0
@@ -1593,16 +1342,9 @@ def _score_one_job(
             },
             "boosts": {
                 "recency": round(rec_boost, 3),
-                "target_role": round(role_boost, 3),
                 "target_noc_match": round(noc_boost, 3),
                 "work_type_fit": round(wt_fit, 3),
                 "shift_fit": round(sh_fit, 3),
-            },
-            "title_match": {
-                "applied": title_match_override,
-                "raw_similarity": (
-                    round(title_sim / 100.0, 3) if target_role else None
-                ),
             },
             "score_pre_caps": round(score, 3),
             # score_post_caps is filled in after _apply_hard_gates runs.
@@ -1612,10 +1354,9 @@ def _score_one_job(
 
     # ----- Hard gates (Sprint 5 step 4) ---------------------------------
     # The shared helper applies all three caps and mutates
-    # score_explanation in place. Both the main eligible path and the
-    # direct-title early-return path call it -- the responder must see
-    # the same honesty floors regardless of which scoring path produced
-    # the result.
+    # score_explanation in place. (Step 2 cutover 2026-07-16: the
+    # direct-title early-return path is retired; only the eligible-
+    # skills path reaches these gates now.)
     missing_names = [s["skill_name"] for s in missing]
     band = _band(score)
     band, score = _apply_hard_gates(

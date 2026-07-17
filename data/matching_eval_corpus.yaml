@@ -437,23 +437,30 @@ cases:
   # ==================================================================
 
   - case_id: "c_exact_title_zero_skills"
-    expectation_status: "transcribed"      # F4, passes_today
+    expectation_status: "authored"         # F4, changed 2026-07-16
     description: >-
       User types the exact Cygnus title with no skills and no
-      experience. Title-match override surfaces the posting; the
-      no-experience floor must STILL set its flag — the flag is the
-      honesty signal the responder narrates from.
-    categories: ["direct_title", "cap_semantics"]
+      experience. Step 2 cutover 2026-07-16 retired the title-match-
+      override signal; title similarity no longer surfaces postings
+      or contributes to substantive_evidence. The honest Step 2
+      outcome is UNDETERMINED — target_role is set but there's no
+      non-credential skill and no experience_text to score against.
+      Pre-Step-2 this case exercised the direct-title early-return
+      path and expectation was transcribed as PREPARATION_GAP. The
+      Step 2 expected outcome is authored, not transcribed — the
+      design decision to retire title-based substantive evidence
+      changes what "correct" looks like for this input archetype.
+    # Kept under 'direct_title' category so eval coverage still
+    # exercises this archetype; the case now locks Step 2's honest
+    # UNDETERMINED outcome for direct-title requests with zero
+    # substantive evidence (skills empty, no experience_text).
+    categories: ["direct_title"]
     profile:
       target_role: "Senior Manager of Operations & Client Services"
       skill_phrases: []
     expect:
-      diagnosis: "PREPARATION_GAP"
-      jobs:
-        - posting_id: "pb_ops_manager_cygnus"
-          band: "stretch"
-          cap_reasons: ["band_capped_by_no_experience"]
-          matched_required: []
+      diagnosis: "UNDETERMINED"
+      jobs: []
 
   - case_id: "c_no_experience_floor"
     expectation_status: "transcribed"      # F7, fails_today_fixed_by_v2

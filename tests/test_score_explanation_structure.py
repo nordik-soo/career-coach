@@ -98,7 +98,9 @@ def _score(*, job_skills, user_skill_names, job=None, profile=None):
 # Shape invariants
 # ---------------------------------------------------------------------------
 SCORE_COMPONENTS_KEYS = {
-    "skill_base", "boosts", "title_match", "score_pre_caps", "score_post_caps",
+    # "title_match" sub-dict retired in Step 2 cutover 2026-07-16 alongside
+    # the title-fit paths in engine.py.
+    "skill_base", "boosts", "score_pre_caps", "score_post_caps",
 }
 SKILL_BASE_KEYS = {
     "value", "mode", "required_match_ratio", "required_weight",
@@ -108,10 +110,11 @@ BOOSTS_KEYS = {
     # "location" retired in Step 1A cutover 2026-07-16 — SSM-only
     # v_current_job guarantees every candidate is SSM-verified, so
     # location is no longer a differentiating fit signal.
-    "recency", "target_role", "target_noc_match",
+    # "target_role" retired in Step 2 cutover 2026-07-16 — title
+    # similarity no longer contributes to fit.
+    "recency", "target_noc_match",
     "work_type_fit", "shift_fit",
 }
-TITLE_MATCH_KEYS = {"applied", "raw_similarity"}
 
 
 def test_score_components_shape_main_path():
@@ -125,7 +128,6 @@ def test_score_components_shape_main_path():
     assert set(sc.keys()) == SCORE_COMPONENTS_KEYS
     assert set(sc["skill_base"].keys()) == SKILL_BASE_KEYS
     assert set(sc["boosts"].keys()) == BOOSTS_KEYS
-    assert set(sc["title_match"].keys()) == TITLE_MATCH_KEYS
 
 
 def test_score_components_weights_match_constants():
@@ -264,109 +266,12 @@ def test_caps_applied_records_all_caps_in_order():
 
 
 # ---------------------------------------------------------------------------
-# Direct-title early-return path -- same shape, mode='direct_title'
+# Direct-title early-return path RETIRED in Step 2 (2026-07-16).
+# Four tests that previously lived here locked the shape of the direct-
+# title path's score_components dict (mode='direct_title', title_match
+# sub-dict populated, boosts all zero, direct_title skill_base collapse
+# for required-only / preferred-only edge cases). That whole path is
+# gone; sub-min-skill jobs now return a deterministic ineligible
+# MatchResult with score_explanation=None. Coverage of the ineligible
+# fallback is exercised by tests/test_step2_title_no_fit.py.
 # ---------------------------------------------------------------------------
-def test_direct_title_path_has_direct_title_mode(monkeypatch):
-    monkeypatch.setattr(engine, "_regulated", lambda *a, **k: None)
-    skills = [_make_skill("communication"), _make_skill("teamwork")]
-    job = _make_job(title="Front Desk Agent")
-    profile = _make_profile()
-    profile["target_role_text"] = "Front Desk Agent"
-
-    result = _score(
-        job_skills=skills,
-        user_skill_names={"communication", "teamwork"},
-        job=job,
-        profile=profile,
-    )
-    sc = result.score_explanation["score_components"]
-    assert set(sc.keys()) == SCORE_COMPONENTS_KEYS   # same shape as main path
-    assert sc["skill_base"]["mode"] == "direct_title"
-    assert sc["title_match"]["applied"] is True
-    assert sc["title_match"]["raw_similarity"] is not None
-    # Direct-title path doesn't apply boosts -- all zero.
-    assert all(v == 0.0 for v in sc["boosts"].values())
-
-
-def test_direct_title_skill_base_value_collapses_for_required_only(monkeypatch):
-    """Regression for the Step 5 review fix.
-
-    On the direct-title path, when the JD has only required skills and
-    the user matches all of them, skill_base.value must equal 1.0 (the
-    'required_only' branch of _weighted_skill_base), NOT the weighted
-    blend 0.8 * 1.0 + 0.2 * 0.0 = 0.8 that an inline-formula bug would
-    produce.
-    """
-    monkeypatch.setattr(engine, "_regulated", lambda *a, **k: None)
-    # Two required skills -> below min_required_skills_for_eligibility (3)
-    # -> direct-title early-return path runs.
-    skills = [
-        _make_skill("communication", skill_type="required"),
-        _make_skill("teamwork", skill_type="required"),
-    ]
-    job = _make_job(title="Front Desk Agent")
-    profile = _make_profile()
-    profile["target_role_text"] = "Front Desk Agent"
-
-    result = _score(
-        job_skills=skills,
-        user_skill_names={"communication", "teamwork"},   # full match
-        job=job,
-        profile=profile,
-    )
-    sb = result.score_explanation["score_components"]["skill_base"]
-    assert sb["mode"] == "direct_title"
-    assert sb["required_match_ratio"] == 1.0
-    assert sb["preferred_match_ratio"] == 0.0
-    # The fix: value must come from _weighted_skill_base (which returns
-    # req_ratio when total_pref == 0), not from re-applying the weights.
-    assert sb["value"] == 1.0, (
-        "direct-title skill_base.value should equal _weighted_skill_base "
-        "output (1.0 for all-required full match), not the weighted blend"
-    )
-
-
-def test_direct_title_skill_base_value_collapses_for_preferred_only(monkeypatch):
-    """Sister case: all-preferred JD with full match -> value = 1.0.
-
-    All-preferred JDs are unusual, but the engine handles them and the
-    same edge-case collapse rule applies.
-    """
-    monkeypatch.setattr(engine, "_regulated", lambda *a, **k: None)
-    skills = [
-        _make_skill("communication", skill_type="preferred"),
-        _make_skill("teamwork", skill_type="preferred"),
-    ]
-    job = _make_job(title="Front Desk Agent")
-    profile = _make_profile()
-    profile["target_role_text"] = "Front Desk Agent"
-
-    result = _score(
-        job_skills=skills,
-        user_skill_names={"communication", "teamwork"},
-        job=job,
-        profile=profile,
-    )
-    sb = result.score_explanation["score_components"]["skill_base"]
-    assert sb["required_match_ratio"] == 0.0
-    assert sb["preferred_match_ratio"] == 1.0
-    assert sb["value"] == 1.0
-
-
-def test_direct_title_path_records_caps(monkeypatch):
-    """Sanity: caps_applied is wired up correctly on the early-return path."""
-    monkeypatch.setattr(engine, "_regulated", lambda *a, **k: None)
-    skills = [_make_skill("communication"), _make_skill("teamwork")]
-    job = _make_job(title="Front Desk Agent")
-    profile = _make_profile(experience_text=None)   # triggers no-exp floor
-    profile["target_role_text"] = "Front Desk Agent"
-
-    result = _score(
-        job_skills=skills,
-        user_skill_names={"communication", "teamwork"},
-        job=job,
-        profile=profile,
-    )
-    assert "band_capped_by_no_experience" in result.score_explanation["caps_applied"]
-    sc = result.score_explanation["score_components"]
-    assert sc["score_post_caps"] == round(MATCH.band_stretch + 0.01, 3)

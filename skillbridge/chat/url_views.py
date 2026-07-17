@@ -118,25 +118,23 @@ class SkillBaseView:
 
 @dataclass(frozen=True)
 class BoostsView:
-    location: float | None
+    # location retired in Step 1A cutover 2026-07-16; target_role retired
+    # in Step 2 cutover 2026-07-16 (title similarity no longer affects fit).
     recency: float | None
-    target_role: float | None
     target_noc_match: float | None
     work_type_fit: float | None
     shift_fit: float | None
 
 
-@dataclass(frozen=True)
-class TitleMatchView:
-    applied: bool | None
-    raw_similarity: float | None
+# TitleMatchView retired in Step 2 cutover 2026-07-16. Title similarity
+# is not measured by the V1 scoring path; a future retrieval layer may
+# reintroduce it as retrieval relevance, but it cannot affect fit.
 
 
 @dataclass(frozen=True)
 class ScoreComponentsView:
     skill_base: SkillBaseView | None
     boosts: BoostsView | None
-    title_match: TitleMatchView | None
     score_pre_caps: float | None
     score_post_caps: float | None
 
@@ -167,14 +165,13 @@ class ScoreExplanationView:
     required_total: int | None
     preferred_match_ratio: float | None
     preferred_total: int | None
-    title_match_similarity: float | None
-    title_match_override: bool | None
+    # title_match_similarity + title_match_override retired in Step 2
+    # cutover 2026-07-16 alongside the title-fit paths in engine.py.
+    # Leaving them here would let the responder cite title similarity
+    # as fit evidence even though title no longer affects score —
+    # exactly the retrieval-vs-fit conflation Step 2 is fixing.
+    # location_boosted was retired earlier in the Step 1A cutover.
     recency_days: int | None
-    # location_boosted retired in Step 1A cutover 2026-07-16 alongside
-    # _location_boost. The SSM-only v_current_job view now guarantees
-    # every candidate row is SSM-verified, so this field carried no
-    # information. Removed from the projector, the serializer allow-
-    # list, and the responder's grounding-fields allowlist.
     work_type_fit: str | None
     shift_fit: str | None
     credential_warning_present: bool | None
@@ -726,22 +723,15 @@ def _project_boosts(raw: object) -> BoostsView | None:
     if not isinstance(raw, dict):
         return None
     return BoostsView(
-        location=_project_float_or_none(raw.get("location")),
         recency=_project_float_or_none(raw.get("recency")),
-        target_role=_project_float_or_none(raw.get("target_role")),
         target_noc_match=_project_float_or_none(raw.get("target_noc_match")),
         work_type_fit=_project_float_or_none(raw.get("work_type_fit")),
         shift_fit=_project_float_or_none(raw.get("shift_fit")),
     )
 
 
-def _project_title_match(raw: object) -> TitleMatchView | None:
-    if not isinstance(raw, dict):
-        return None
-    return TitleMatchView(
-        applied=_project_bool_or_none(raw.get("applied")),
-        raw_similarity=_project_float_or_none(raw.get("raw_similarity")),
-    )
+# _project_title_match retired in Step 2 cutover 2026-07-16 alongside
+# TitleMatchView. See BoostsView / ScoreExplanationView.
 
 
 def _project_score_components(raw: object) -> ScoreComponentsView | None:
@@ -750,7 +740,6 @@ def _project_score_components(raw: object) -> ScoreComponentsView | None:
     return ScoreComponentsView(
         skill_base=_project_skill_base(raw.get("skill_base")),
         boosts=_project_boosts(raw.get("boosts")),
-        title_match=_project_title_match(raw.get("title_match")),
         score_pre_caps=_project_float_or_none(raw.get("score_pre_caps")),
         score_post_caps=_project_float_or_none(raw.get("score_post_caps")),
     )
@@ -840,12 +829,6 @@ def _project_score_explanation(
             se.get("preferred_match_ratio"),
         ),
         preferred_total=_project_int_or_none(se.get("preferred_total")),
-        title_match_similarity=_project_float_or_none(
-            se.get("title_match_similarity"),
-        ),
-        title_match_override=_project_bool_or_none(
-            se.get("title_match_override"),
-        ),
         recency_days=_project_int_or_none(se.get("recency_days")),
         work_type_fit=_project_str_or_none(se.get("work_type_fit")),
         shift_fit=_project_str_or_none(se.get("shift_fit")),
@@ -1711,19 +1694,15 @@ def serialize_score_components_for_prompt(
         out["skill_base"] = sb_out
     if sc.boosts is not None:
         b_out: dict[str, object] = {}
-        for f in ("location", "recency", "target_role",
+        # `location` and `target_role` retired in Step 1A / Step 2 cutovers
+        # 2026-07-16. See BoostsView docstring.
+        for f in ("recency",
                   "target_noc_match", "work_type_fit", "shift_fit"):
             v = getattr(sc.boosts, f)
             if v is not None:
                 b_out[f] = v
         out["boosts"] = b_out
-    if sc.title_match is not None:
-        tm_out: dict[str, object] = {}
-        for f in ("applied", "raw_similarity"):
-            v = getattr(sc.title_match, f)
-            if v is not None:
-                tm_out[f] = v
-        out["title_match"] = tm_out
+    # title_match retired in Step 2 cutover 2026-07-16.
     if sc.score_pre_caps is not None:
         out["score_pre_caps"] = sc.score_pre_caps
     if sc.score_post_caps is not None:
@@ -1764,7 +1743,6 @@ def serialize_score_explanation_for_prompt(
         "required_match_strength_sum", "preferred_match_strength_sum",
         "skill_match_ratio", "required_match_ratio", "required_total",
         "preferred_match_ratio", "preferred_total",
-        "title_match_similarity", "title_match_override",
         "recency_days", "work_type_fit", "shift_fit",
         "credential_warning_present", "work_type_user", "work_type_job",
         "band_capped_by_credential", "band_capped_by_no_experience",
