@@ -37,6 +37,11 @@ from skillbridge.ingest.base import (
     upsert_job,
     write_raw_job,
 )
+from skillbridge.ingest.partners import (
+    _classify_declared_location_field,
+    _classify_description_field,
+)
+from skillbridge.match.region import normalize_declared_job_location
 
 log = logging.getLogger(__name__)
 
@@ -101,14 +106,54 @@ def _row_to_job(row: dict, *, source: str) -> NormalizedJob | None:
     source_job_id = str(source_job_id).strip()
     if not title or not source_job_id:
         return None
+
+    # Step 1A (2026-07-15) description axis. Classifier tolerates
+    # non-string / oversized inputs (produces parse_error instead of
+    # crashing on .strip()).
+    raw_desc = row.get("description")
+    if raw_desc is None:
+        raw_desc = row.get("Job Description")
+    description_full, desc_status = _classify_description_field(raw_desc)
+    if desc_status == "ok":
+        description_evidence_status = "full_source"
+    elif desc_status == "parse_error":
+        description_full = None
+        description_evidence_status = "parse_error"
+    else:  # "missing"
+        description_full = None
+        description_evidence_status = "missing"
+
+    # Step 1A location axis. Classifier distinguishes present-but-
+    # non-string (invalid) from missing.
+    raw_loc = row.get("location")
+    if raw_loc is None:
+        raw_loc = row.get("Location")
+    source_location_text, loc_field_status = _classify_declared_location_field(
+        raw_loc
+    )
+    if loc_field_status == "invalid":
+        normalized_loc = None
+        remote_flag = False
+        location_resolution_status = "invalid"
+        location_provenance = "source_declared"
+    else:
+        (normalized_loc, remote_flag) = normalize_declared_job_location(
+            source_location_text
+        )
+        if normalized_loc is not None:
+            location_resolution_status = "resolved"
+            location_provenance = "source_declared"
+        else:
+            location_resolution_status = "missing"
+            location_provenance = "none" if source_location_text is None else "source_declared"
+
     return NormalizedJob(
         source=source,
         source_job_id=source_job_id,
         title=title,
         employer=(row.get("employer") or row.get("Employer") or "").strip() or None,
-        location=(row.get("location") or row.get("Location") or "").strip() or None,
+        # Legacy `location` / `description` derived by upsert_job.
         region_code=(row.get("region_code") or "").strip() or None,
-        description=(row.get("description") or row.get("Job Description") or "").strip() or None,
         url=(row.get("url") or row.get("URL") or "").strip() or None,
         posted_date=parse_date_loose(row.get("posted_date") or row.get("Date Posted")),
         closing_date=parse_date_loose(row.get("closing_date") or row.get("Closing Date")),
@@ -116,8 +161,16 @@ def _row_to_job(row: dict, *, source: str) -> NormalizedJob | None:
         salary_low=parse_float_loose(row.get("salary_low") or row.get("Min Wage")),
         salary_high=parse_float_loose(row.get("salary_high") or row.get("Max Wage")),
         employment_type=(row.get("employment_type") or row.get("Employment Type") or "").strip() or None,
-        remote_flag=None,
+        remote_flag=remote_flag or None,
         noc_code=(row.get("noc_code") or row.get("NOC Code") or "").strip() or None,
+        description_full=description_full,
+        description_excerpt=None,
+        description_evidence_status=description_evidence_status,
+        source_location_text=source_location_text,
+        source_coordinates=None,
+        normalized_job_location=normalized_loc,
+        location_resolution_status=location_resolution_status,
+        location_provenance=location_provenance,
         raw_payload=dict(row),
     )
 

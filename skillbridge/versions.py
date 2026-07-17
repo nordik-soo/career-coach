@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-ENGINE_VERSION_JOB_MATCH = "job-match-v1.1.0"   # PR 10: + work_type_fit, shift_fit
+ENGINE_VERSION_JOB_MATCH = "job-match-v1.2.0"   # Step 1A cutover 2026-07-16: SSM-only v_current_job; _location_boost retired
 ENGINE_VERSION_TRAINING_REC = "training-rec-v1.0.0"
 EXTRACTOR_VERSION_RULE = "rule-extractor-v1.0.0"
 EXTRACTOR_VERSION_LLM = "llm-haiku-extractor-v1.2.0"   # Sprint 5: + required/preferred skill_type labels

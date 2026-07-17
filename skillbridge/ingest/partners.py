@@ -26,6 +26,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config import JOB_SOURCES
+from skillbridge.match.region import normalize_declared_job_location
 from skillbridge.ingest.base import (
     JobConnector,
     NormalizedJob,
@@ -258,7 +259,31 @@ def _normalize_sccc_wp_rest_item(item: dict) -> NormalizedJob | None:
         or "remote" in location_raw.lower()
     )
 
-    description = _clean_wp_html(_get(item, "content", "rendered"))
+    # Step 1A (2026-07-15) description axis: bypass `_get` because it
+    # silently normalizes non-string terminals to "" — that would hide
+    # parse_error signal for shape-defective WP payloads. Walk the path
+    # directly and let `_classify_description_field` distinguish
+    # missing (None / empty) from parse_error (non-string / oversized).
+    _wp_content = item.get("content")
+    if isinstance(_wp_content, dict):
+        _raw_rendered = _wp_content.get("rendered")
+    else:
+        _raw_rendered = None
+
+    _description_parse_failed = False
+    if _raw_rendered is not None and not isinstance(_raw_rendered, str):
+        # WP `content.rendered` should always be a string; a dict/list
+        # is a shape defect that must surface as parse_error, not be
+        # silently coerced.
+        description = None
+        _description_parse_failed = True
+    else:
+        try:
+            description = _clean_wp_html(_raw_rendered)
+        except Exception:  # noqa: BLE001
+            description = None
+            _description_parse_failed = True
+
     salary_text = _str_or_none(meta.get("_job_salary"))
 
     posted_date = parse_date_loose(_iso_date_part(item.get("date")))
@@ -266,14 +291,58 @@ def _normalize_sccc_wp_rest_item(item: dict) -> NormalizedJob | None:
     # Closing date: WP Job Manager stores _job_expires (sometimes empty).
     closing_date = parse_date_loose(meta.get("_job_expires"))
 
+    # Step 1A (2026-07-15) description axis. SCCC captures full WP-
+    # rendered content when parsing succeeds. Above try/except sets
+    # _description_parse_failed=True when _clean_wp_html raises.
+    # _classify_description_field also detects non-string / oversized
+    # payloads that slipped through.
+    if _description_parse_failed:
+        description_full = None
+        description_evidence_status = "parse_error"
+    else:
+        description_full, description_status = _classify_description_field(
+            description
+        )
+        if description_status == "ok":
+            description_evidence_status = "full_source"
+        elif description_status == "parse_error":
+            description_full = None
+            description_evidence_status = "parse_error"
+        else:  # "missing"
+            description_full = None
+            description_evidence_status = "missing"
+
+    # Step 1A location axis. Source-declared string comes from
+    # `location_raw` (meta._job_location). `_classify_declared_
+    # location_field` distinguishes missing from invalid (present-but-
+    # non-string). Non-string locations MUST produce invalid, not
+    # silently coerced to a string.
+    source_location_text, loc_field_status = _classify_declared_location_field(
+        location_raw
+    )
+    if loc_field_status == "invalid":
+        normalized_loc = None
+        remote_from_canon = False
+        location_resolution_status = "invalid"
+        location_provenance = "source_declared"  # source tried, we couldn't use
+    else:
+        (normalized_loc, remote_from_canon) = normalize_declared_job_location(
+            source_location_text
+        )
+        if normalized_loc is not None:
+            location_resolution_status = "resolved"
+            location_provenance = "source_declared"
+        else:
+            location_resolution_status = "missing"
+            location_provenance = "none" if source_location_text is None else "source_declared"
+
     return NormalizedJob(
         source="sccc",
         source_job_id=str(wp_id),
         title=title,
         employer=employer,
-        location=location,
+        # Legacy `location` and `description` derived by upsert_job.
         region_code=None,
-        description=description or None,
         url=link or None,
         posted_date=posted_date,
         closing_date=closing_date,
@@ -281,8 +350,18 @@ def _normalize_sccc_wp_rest_item(item: dict) -> NormalizedJob | None:
         salary_low=parse_float_loose(meta.get("_job_salary_low")),
         salary_high=parse_float_loose(meta.get("_job_salary_high")),
         employment_type=None,  # job-types taxonomy; deferred to 9B
-        remote_flag=remote_flag,
+        remote_flag=remote_flag or remote_from_canon,
         noc_code=None,
+        # Step 1A description axis.
+        description_full=description_full,
+        description_excerpt=None,
+        description_evidence_status=description_evidence_status,
+        # Step 1A location axis.
+        source_location_text=source_location_text,
+        source_coordinates=None,  # SCCC doesn't provide coordinates
+        normalized_job_location=normalized_loc,
+        location_resolution_status=location_resolution_status,
+        location_provenance=location_provenance,
         raw_payload={
             "source": "sccc_wp_rest_v2",
             "wp_id": wp_id,
@@ -292,6 +371,12 @@ def _normalize_sccc_wp_rest_item(item: dict) -> NormalizedJob | None:
             "link": link,
             "application": _str_or_none(meta.get("_application")),
             "location_raw": location_raw,
+            # Step 1A (2026-07-16): full WP item stored so Step 1A
+            # backfill can re-normalize from raw with the same logic
+            # as live ingest. Historical SCCC rows lack this key and
+            # take the partial location-only backfill path (see
+            # pipeline.step1a_backfill).
+            "item": item,
         },
     )
 
@@ -361,6 +446,117 @@ def _is_valid_noc_2021_code(code) -> bool:
     return isinstance(code, str) and bool(_NOC_2021_PATTERN.match(code))
 
 
+def _validate_geojson_coordinates(coords) -> tuple[list | None, str]:
+    """Step 1A (2026-07-15) coordinate validation per spec §2d.
+
+    Contract: GeoJSON coordinate values MUST be JSON arrays (Python
+    lists after deserialization). Tuples are rejected as invalid —
+    the GeoJSON spec doesn't produce them and accepting them was a
+    review-flagged latitude.
+
+    Returns (validated_list_or_none, status). Status is one of:
+      "valid"   — coords passed all checks; array preserved as-is
+                  with any 3-D altitude value intact.
+      "missing" — coords parameter was None.
+      "invalid" — coords present but malformed (non-list, length < 2,
+                  non-numeric, longitude out of [-180, 180], or
+                  latitude out of [-90, 90]).
+
+    Extras beyond index 1 (altitude, etc.) are preserved verbatim
+    but ignored for validation — a 3-D GeoJSON point is valid.
+    """
+    if coords is None:
+        return None, "missing"
+    if not isinstance(coords, list):
+        # Tuples are rejected — GeoJSON spec says JSON array only.
+        return None, "invalid"
+    if len(coords) < 2:
+        return None, "invalid"
+
+    lon, lat = coords[0], coords[1]
+    # Reject booleans (bool is a subclass of int in Python).
+    if isinstance(lon, bool) or isinstance(lat, bool):
+        return None, "invalid"
+    if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+        return None, "invalid"
+    if not (-180.0 <= float(lon) <= 180.0):
+        return None, "invalid"
+    if not (-90.0 <= float(lat) <= 90.0):
+        return None, "invalid"
+
+    # Preserve the full array (list-of-numbers, altitude included).
+    return list(coords), "valid"
+
+
+# Description-parse sanity guard: reject payloads that would be a
+# data-format leak into the DB (e.g., a JSON blob embedded in the
+# description column, or an accidental full-page HTML dump).
+_DESCRIPTION_MAX_BYTES: int = 1 * 1024 * 1024  # 1 MB
+
+
+def _classify_description_field(value) -> tuple[str | None, str]:
+    """Step 1A (2026-07-15) description classification per spec §2g.
+
+    Given a raw description-shaped input from a connector, returns
+    (normalized_text_or_none, status).
+
+    Rules (provenance-driven, not character-count):
+      - value is None                            → (None, "missing")
+      - value is not a string                    → (None, "parse_error")
+      - value.strip() is empty                   → (None, "missing")
+      - len(value_bytes) > _DESCRIPTION_MAX_BYTES → (None, "parse_error")
+      - otherwise                                → (stripped_text, "ok")
+
+    The "ok" status is a transient label — callers decide whether the
+    ok'd text populates description_full (full_source) or
+    description_excerpt (excerpt_only) based on their source's
+    provenance. Missing and parse_error are terminal labels.
+    """
+    if value is None:
+        return None, "missing"
+    if not isinstance(value, str):
+        return None, "parse_error"
+    try:
+        # Byte-length check catches oversized payloads. Encode with
+        # errors=replace so a partially-corrupted string can still be
+        # measured — the point is size, not correctness.
+        if len(value.encode("utf-8", errors="replace")) > _DESCRIPTION_MAX_BYTES:
+            return None, "parse_error"
+    except Exception:  # noqa: BLE001
+        return None, "parse_error"
+    stripped = value.strip()
+    if not stripped:
+        return None, "missing"
+    return stripped, "ok"
+
+
+def _classify_declared_location_field(value) -> tuple[str | None, str]:
+    """Step 1A (2026-07-15) source-declared location classification.
+
+    Returns (source_location_text_or_none, status).
+
+    Rules:
+      - value is None       → (None, "missing")
+      - value is not a str  → (None, "invalid")   ← distinct from missing
+      - value.strip() empty → (None, "missing")
+      - otherwise           → (stripped_text, "ok")
+
+    The invalid case (present-but-non-string) MUST NOT be silently
+    converted to missing. It's a data-shape defect the caller should
+    persist as location_resolution_status="invalid" with
+    location_provenance="source_declared" — same reasoning as
+    malformed geometry: the source tried, we couldn't use it.
+    """
+    if value is None:
+        return None, "missing"
+    if not isinstance(value, str):
+        return None, "invalid"
+    stripped = value.strip()
+    if not stripped:
+        return None, "missing"
+    return stripped, "ok"
+
+
 def _is_in_ssm_bbox(coords) -> bool:
     """True iff [lng, lat] falls within the configured SSM bounding box.
 
@@ -400,13 +596,25 @@ def _fetch_awic_geojson(url: str) -> Iterable[NormalizedJob]:
 
     Emits per-run observability counters at INFO on completion:
       fetched                -- total features seen in the response
-      after_ssm_filter       -- yielded to the caller (post SSM bbox)
-      dropped_no_coords      -- feature had null / malformed coordinates
-      dropped_outside_ssm    -- feature was outside the SSM bbox
+      yielded                -- features passed through to the caller
+                                (Step 1A: coordinate-based drops
+                                removed; only shape-defect drops)
       dropped_malformed      -- feature was missing post_id / title
       with_noc_provided      -- yielded feature had a valid nocs_2021
       needing_noc_backfill   -- yielded feature had no valid nocs_2021
                                 (downstream resolve_title_to_noc runs)
+      dropped_no_coords      -- LEGACY (always 0 post-Step-1A).
+                                Backward-compat for pipeline snapshot.
+      dropped_outside_ssm    -- LEGACY (always 0 post-Step-1A).
+                                Backward-compat for pipeline snapshot.
+
+    Under Step 1A (2026-07-15) the connector no longer uses
+    coordinates or the SSM bounding box as an ingestion gate — the
+    live SSM market is defined by v_current_job's location-resolution
+    clauses, not by ingest-time geometry filtering. AWIC rows with
+    unresolved / missing / invalid location stay outside v_current_job
+    but persist in core.job_posting for Step 1B detail-page fetching
+    to resolve later.
     """
     headers = {
         "User-Agent": AWIC_JOBS_USER_AGENT,
@@ -449,15 +657,13 @@ def _fetch_awic_geojson(url: str) -> Iterable[NormalizedJob]:
         log.error("AWIC jobs: features is not a list")
         return
 
+    # Step 1A (2026-07-15): coordinate-based drop paths removed. Only
+    # genuine shape defects (missing post_id / title) drop features
+    # now. Coordinate state becomes NormalizedJob metadata (see
+    # `_normalize_awic_geojson_feature`).
     for ft in features:
         fetched += 1
         job, drop_reason, noc_provided = _normalize_awic_geojson_feature(ft)
-        if drop_reason == "no_coords":
-            dropped_no_coords += 1
-            continue
-        if drop_reason == "outside_ssm":
-            dropped_outside_ssm += 1
-            continue
         if drop_reason == "malformed":
             dropped_malformed += 1
             continue
@@ -473,12 +679,16 @@ def _fetch_awic_geojson(url: str) -> Iterable[NormalizedJob]:
         yielded += 1
         yield job
 
+    # Post-Step-1A telemetry: fetched-vs-yielded is the honest signal.
+    # Coordinate counters retained for backward-compat but always 0 —
+    # the pipeline snapshot consumer can be updated in a follow-on PR.
     log.info(
-        "AWIC jobs: fetched=%d after_ssm_filter=%d dropped_no_coords=%d "
-        "dropped_outside_ssm=%d dropped_malformed=%d with_noc_provided=%d "
-        "needing_noc_backfill=%d",
-        fetched, yielded, dropped_no_coords, dropped_outside_ssm,
-        dropped_malformed, with_noc_provided, needing_noc_backfill,
+        "AWIC jobs: fetched=%d yielded=%d dropped_malformed=%d "
+        "with_noc_provided=%d needing_noc_backfill=%d "
+        "dropped_no_coords=%d dropped_outside_ssm=%d",
+        fetched, yielded, dropped_malformed,
+        with_noc_provided, needing_noc_backfill,
+        dropped_no_coords, dropped_outside_ssm,
     )
 
 
@@ -487,43 +697,40 @@ def _normalize_awic_geojson_feature(
 ) -> tuple[NormalizedJob | None, str | None, bool]:
     """Map one AWIC GeoJSON feature to NormalizedJob.
 
+    Step 1A (2026-07-15): coordinate-based ingestion gates removed.
+    The pre-Step-1A logic dropped features on missing / malformed /
+    outside-bbox coordinates, using geometry that Step 1A explicitly
+    labels untrustworthy for job location. Under Step 1A those cases
+    become NormalizedJob attributes, not drops:
+
+      Valid coordinates, anywhere → ingest,
+        location_resolution_status="unresolved", provenance="geometry"
+      Missing coordinates         → ingest,
+        location_resolution_status="missing",    provenance="none"
+      Malformed coordinates       → ingest,
+        location_resolution_status="invalid",    provenance="geometry"
+
+    All AWIC rows stay OUTSIDE `v_current_job` because none carries a
+    verified source-declared location — the view filter requires
+    `normalized_job_location = 'Sault Ste. Marie'` AND status =
+    'resolved'. Persistence continues so Step 1B's detail-page fetch
+    can populate real locations later without re-scraping.
+
+    Only genuine data-shape defects drop the feature: non-dict input,
+    non-dict properties, missing post_id, or missing/blank title.
+
     Returns a 3-tuple: (job_or_None, drop_reason_or_None, noc_provided).
 
       drop_reason values (mutually exclusive):
-        "no_coords"    -- geometry.coordinates is missing / null / malformed
-        "outside_ssm"  -- coordinates are outside the SSM bounding box
-        "malformed"    -- feature is missing required fields (post_id, title)
-        None           -- feature was accepted; `job` is populated
+        "malformed" — feature shape or required identifiers missing
+        None        — feature was accepted; `job` is populated
 
       noc_provided is True iff the feature carried a valid 5-digit
       NOC 2021 code that we passed through. False means job.noc_code is
       None and the downstream backfill will resolve it from the title.
-
-    Order of checks matters:
-      1. coordinates first (cheapest; drops the largest share)
-      2. SSM bbox
-      3. required fields
-      4. NOC extraction
-    Rearranging changes the counter breakdown even though the final
-    yielded set is the same.
     """
     if not isinstance(feature, dict):
         return None, "malformed", False
-
-    geom = feature.get("geometry") or {}
-    coords = geom.get("coordinates") if isinstance(geom, dict) else None
-    if coords is None:
-        return None, "no_coords", False
-    if not _is_in_ssm_bbox(coords):
-        # _is_in_ssm_bbox also returns False on malformed coordinates
-        # (non-list, short list, non-numeric). We treat those as
-        # "no_coords" rather than "outside_ssm" so the counter reflects
-        # data quality vs geography honestly.
-        if not (isinstance(coords, (list, tuple)) and len(coords) >= 2
-                and all(isinstance(c, (int, float)) and not isinstance(c, bool)
-                        for c in coords[:2])):
-            return None, "no_coords", False
-        return None, "outside_ssm", False
 
     props = feature.get("properties") or {}
     if not isinstance(props, dict):
@@ -536,6 +743,46 @@ def _normalize_awic_geojson_feature(
     title_str = str(title).strip()
     if not title_str:
         return None, "malformed", False
+
+    # Step 1A (2026-07-15) coordinate classification. Three states
+    # matter and MUST NOT collapse:
+    #
+    #   1. Geometry key absent OR value is None
+    #      → source made no attempt to supply geometry
+    #      → location_resolution_status = "missing"
+    #      → location_provenance          = "none"
+    #
+    #   2. Geometry present but not a dict (e.g., "bad-shape" string)
+    #      → source ATTEMPTED to supply geometry but shape is broken
+    #      → location_resolution_status = "invalid"
+    #      → location_provenance          = "geometry"
+    #
+    #   3. Geometry is a dict → look at coordinates key. Validator
+    #      distinguishes valid coords (unresolved/geometry) from
+    #      invalid coords (invalid/geometry) from missing coords
+    #      (missing/none).
+    #
+    # Correction 2026-07-16: pre-fix code collapsed case 2 to case 1
+    # (`feature.get("geometry") or {}` swallowed non-dict into empty
+    # dict, then treated absent coordinates as missing). That erased
+    # the distinction between "source provided nothing" and "source
+    # provided garbage" — critical for the historical backfill so we
+    # can distinguish absent data from corrupted data.
+    geometry_raw = feature.get("geometry")
+    if geometry_raw is None:
+        # Case 1: no attempt to supply geometry.
+        coords = None
+        _geom_shape_invalid = False
+    elif not isinstance(geometry_raw, dict):
+        # Case 2: geometry supplied but not a dict — the shape itself
+        # is broken. Skip coordinate extraction; validator's "missing"
+        # would misclassify this as absent.
+        coords = None
+        _geom_shape_invalid = True
+    else:
+        # Case 3: dict-shaped; validator classifies coordinates.
+        coords = geometry_raw.get("coordinates")
+        _geom_shape_invalid = False
 
     # NOC 2021: first valid 5-digit code; else None + backfill runs.
     noc_provided = False
@@ -553,16 +800,59 @@ def _normalize_awic_geojson_feature(
     # accepts these tokens.
     employment_type = _str_or_none(props.get("type"))
 
+    # Step 1A (2026-07-15) description axis. AWIC v1 GeoJSON does NOT
+    # carry the full JD body — only an excerpt. Step 1B will add
+    # detail-page fetching to recover the full description; until then
+    # every AWIC row is excerpt_only, missing, or parse_error. Uses
+    # _classify_description_field so a non-string / oversized excerpt
+    # produces parse_error rather than being silently stringified.
+    excerpt_text, excerpt_status = _classify_description_field(
+        props.get("excerpt")
+    )
+    if excerpt_status == "ok":
+        description_excerpt = excerpt_text
+        description_evidence_status = "excerpt_only"
+    elif excerpt_status == "parse_error":
+        description_excerpt = None
+        description_evidence_status = "parse_error"
+    else:  # "missing"
+        description_excerpt = None
+        description_evidence_status = "missing"
+
+    # Step 1A location axis. AWIC v1 has NO source-declared location
+    # field and geometry is not authoritative for job location
+    # (verified: Community Support Worker in Wawa has coordinates
+    # pointing at downtown SSM). We preserve geometry as evidence
+    # metadata but never treat it as a job location.
+    if _geom_shape_invalid:
+        # Case 2 from coordinate classification block above: geometry
+        # supplied but not dict-shaped. Source attempted → provenance
+        # is "geometry"; the attempt failed → status is "invalid".
+        validated_coords = None
+        location_resolution_status = "invalid"
+        location_provenance = "geometry"
+    else:
+        validated_coords, coord_status = _validate_geojson_coordinates(coords)
+        if coord_status == "valid":
+            location_resolution_status = "unresolved"  # geometry alone can't resolve
+            location_provenance = "geometry"
+        elif coord_status == "invalid":
+            location_resolution_status = "invalid"
+            location_provenance = "geometry"  # tried but failed
+        else:  # coord_status == "missing"
+            location_resolution_status = "missing"
+            location_provenance = "none"
+
     job = NormalizedJob(
         source="awic_jobs",
         source_job_id=str(post_id),
         title=title_str,
         employer=_str_or_none(props.get("employer")),
-        # location is canonicalized post-filter. Real location string
-        # can be reconstructed from raw_payload.feature if needed.
-        location="Sault Ste. Marie",
+        # Legacy `location` and `description` are DERIVED by upsert_job
+        # from the new-axis fields when the connector emits an explicit
+        # evidence status (see base.py `upsert_job` transitional
+        # persistence). Do NOT set them here.
         region_code=None,
-        description=_str_or_none(props.get("excerpt")),
         url=_str_or_none(props.get("url")),
         # AWIC's GeoJSON does not include posted / closing dates in v1.
         posted_date=None,
@@ -573,6 +863,16 @@ def _normalize_awic_geojson_feature(
         employment_type=employment_type,
         remote_flag=None,
         noc_code=noc_code,
+        # Step 1A description axis.
+        description_full=None,          # never captured from AWIC v1 GeoJSON
+        description_excerpt=description_excerpt,
+        description_evidence_status=description_evidence_status,
+        # Step 1A location axis. NEVER hardcode "Sault Ste. Marie".
+        source_location_text=None,       # AWIC v1 has no such property
+        source_coordinates=validated_coords,
+        normalized_job_location=None,    # geometry alone can't resolve
+        location_resolution_status=location_resolution_status,
+        location_provenance=location_provenance,
         raw_payload={
             "source": "awic_geojson_v1",
             "feature": feature,  # full GeoJSON feature for audit / replay
@@ -586,8 +886,11 @@ def _is_sccc_ssm_location(location: str | None, url: str) -> bool:
 
     SCCC's mandate covers the full Algoma District, so a posting in
     Wawa or Chapleau is legitimately local to a newcomer using
-    SkillBridge SSM. Communities are configured via LOCAL_CITIES in
-    .env so the product scope can be tuned without code changes.
+    SkillBridge SSM. Communities are configured via
+    SCCC_INGEST_LOCALITIES in .env (renamed 2026-07-16 from
+    LOCAL_CITIES) so the ingest scope can be tuned without code
+    changes. This is an INGESTION allowlist only — the matching engine
+    ignores it; SSM-only v_current_job is the market boundary.
 
     Empty locations are excluded rather than assumed local — the API
     exposes _job_location explicitly, so missing data is a real
@@ -597,12 +900,12 @@ def _is_sccc_ssm_location(location: str | None, url: str) -> bool:
     a city name ("sault-ste-marie", "chapleau", etc.) keep matching
     even when the metadata field is unusual.
     """
-    from config import LOCAL_CITIES
+    from config import SCCC_INGEST_LOCALITIES
 
     if not (location or "").strip():
         return False
     haystack = f"{location or ''} {url}".lower()
-    return any(city in haystack for city in LOCAL_CITIES)
+    return any(city in haystack for city in SCCC_INGEST_LOCALITIES)
 
 
 # ============================================================================
@@ -643,14 +946,54 @@ def _row_to_job(row: dict, *, source: str) -> NormalizedJob | None:
     source_job_id = str(source_job_id).strip()
     if not title or not source_job_id:
         return None
+
+    # Step 1A (2026-07-15) description axis. Classifier tolerates
+    # non-string / oversized inputs (produces parse_error rather
+    # than crashing on .strip()).
+    raw_desc = row.get("description")
+    if raw_desc is None:
+        raw_desc = row.get("Job Description")
+    description_full, desc_status = _classify_description_field(raw_desc)
+    if desc_status == "ok":
+        description_evidence_status = "full_source"
+    elif desc_status == "parse_error":
+        description_full = None
+        description_evidence_status = "parse_error"
+    else:  # "missing"
+        description_full = None
+        description_evidence_status = "missing"
+
+    # Step 1A location axis. Classifier distinguishes present-but-
+    # non-string (invalid) from missing.
+    raw_loc = row.get("location")
+    if raw_loc is None:
+        raw_loc = row.get("Location")
+    source_location_text, loc_field_status = _classify_declared_location_field(
+        raw_loc
+    )
+    if loc_field_status == "invalid":
+        normalized_loc = None
+        remote_flag = False
+        location_resolution_status = "invalid"
+        location_provenance = "source_declared"
+    else:
+        (normalized_loc, remote_flag) = normalize_declared_job_location(
+            source_location_text
+        )
+        if normalized_loc is not None:
+            location_resolution_status = "resolved"
+            location_provenance = "source_declared"
+        else:
+            location_resolution_status = "missing"
+            location_provenance = "none" if source_location_text is None else "source_declared"
+
     return NormalizedJob(
         source=source,
         source_job_id=source_job_id,
         title=title,
         employer=(row.get("employer") or row.get("Employer") or "").strip() or None,
-        location=(row.get("location") or row.get("Location") or "").strip() or None,
+        # Legacy `location` / `description` derived by upsert_job.
         region_code=row.get("region_code") or None,
-        description=(row.get("description") or row.get("Job Description") or "").strip() or None,
         url=row.get("url") or row.get("URL") or None,
         posted_date=parse_date_loose(row.get("posted_date") or row.get("Date Posted")),
         closing_date=parse_date_loose(row.get("closing_date") or row.get("Closing Date")),
@@ -658,8 +1001,16 @@ def _row_to_job(row: dict, *, source: str) -> NormalizedJob | None:
         salary_low=parse_float_loose(row.get("salary_low") or row.get("Min Wage")),
         salary_high=parse_float_loose(row.get("salary_high") or row.get("Max Wage")),
         employment_type=(row.get("employment_type") or row.get("Employment Type") or "").strip() or None,
-        remote_flag=None,
+        remote_flag=remote_flag or None,
         noc_code=(row.get("noc_code") or row.get("NOC Code") or "").strip() or None,
+        description_full=description_full,
+        description_excerpt=None,
+        description_evidence_status=description_evidence_status,
+        source_location_text=source_location_text,
+        source_coordinates=None,
+        normalized_job_location=normalized_loc,
+        location_resolution_status=location_resolution_status,
+        location_provenance=location_provenance,
         raw_payload=dict(row),
     )
 

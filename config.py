@@ -229,7 +229,16 @@ REGION_NAME = os.getenv("REGION_NAME", "Sault Ste. Marie")
 # SSM-only product: no national region codes. National feeds (Job Bank,
 # StatCan, Census) are NOT used as data sources — see BREAKING.md.
 REGION_FSAS = _list("REGION_FSAS", "P6A,P6B,P6C,P0R,P0S,P5A")
-LOCAL_CITIES = {c.lower() for c in _list("LOCAL_CITIES", "Sault Ste. Marie")}
+# Renamed 2026-07-16 from LOCAL_CITIES. This is an INGESTION-side
+# allowlist for SCCC's partner-feed URL/text matching — SCCC's mandate
+# covers the full Algoma District, so this admits Wawa/Blind River/
+# Chapleau/etc. into the SCCC ingest stream. It is NEVER consulted by
+# the matching engine — see match/region.py for the SSM-only market
+# rule. Misuse of the old name for matching decisions caused false SSM
+# labels on Algoma postings; the rename makes that misuse impossible.
+SCCC_INGEST_LOCALITIES = {
+    c.lower() for c in _list("SCCC_INGEST_LOCALITIES", "Sault Ste. Marie")
+}
 
 # SSM coordinate bounding box for geo-tagged ingest sources (v1: AWIC jobs).
 # Defaults are approximate; refinable via env vars. Coordinates are in
@@ -461,7 +470,9 @@ class MatchEngineConfig:
     top_n_required_skills: int = _int("MATCH_TOP_N_REQUIRED_SKILLS", 12)
     min_required_skills_for_eligibility: int = _int("MATCH_MIN_REQUIRED_SKILLS_FOR_ELIGIBILITY", 3)
     recency_boost_days: int = _int("MATCH_RECENCY_BOOST_DAYS", 30)
-    location_boost_local_csd: float = _float("MATCH_LOCATION_BOOST_LOCAL_CSD", 0.10)
+    # location_boost_local_csd retired in Step 1A cutover (2026-07-16).
+    # SSM-only v_current_job guarantees every candidate row is SSM-
+    # verified; location was manufacturing false fit signal.
     band_strong: float = _float("MATCH_BAND_STRONG", 0.75)
     band_good: float = _float("MATCH_BAND_GOOD", 0.60)
     band_stretch: float = _float("MATCH_BAND_STRETCH", 0.40)

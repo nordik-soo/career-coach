@@ -468,7 +468,6 @@ def test_score_explanation_view_full_field_population():
         "title_match_similarity": 0.82,
         "title_match_override": False,
         "recency_days": 10,
-        "location_boosted": True,
         "work_type_fit": "matched",
         "shift_fit": "no_signal",
         "credential_warning_present": False,
@@ -485,7 +484,7 @@ def test_score_explanation_view_full_field_population():
                 "preferred_match_ratio": 0.7, "preferred_weight": 0.2,
             },
             "boosts": {
-                "location": 0.05, "recency": 0.0, "target_role": 0.1,
+                "recency": 0.0, "target_role": 0.1,
                 "target_noc_match": 0.0, "work_type_fit": 0.02,
                 "shift_fit": 0.0,
             },
@@ -507,7 +506,6 @@ def test_score_explanation_view_full_field_population():
     assert view.title_match_similarity == 0.82
     assert view.title_match_override is False
     assert view.recency_days == 10
-    assert view.location_boosted is True
     assert view.work_type_fit == "matched"
     assert view.shift_fit == "no_signal"
     assert view.credential_warning_present is False

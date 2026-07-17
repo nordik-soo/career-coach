@@ -3,7 +3,8 @@ soft-offer eligibility predicates.
 
 Covers (per docs/adjacent-recommendations-design.md):
   - is_ssm_region_job: dedicated SSM-proper aliases + verified region
-    codes; LOCAL_CITIES is NOT consulted; Algoma communities rejected.
+    codes; SCCC_INGEST_LOCALITIES is NOT consulted; Algoma communities
+    rejected.
   - has_usable_skill_evidence: three non-credential resume/chat skills
     @ ≥ 0.6 confidence; resume-less paths supported.
   - is_credential_only_band_cap: reads score_explanation.caps_applied
@@ -37,6 +38,7 @@ from skillbridge.match.region import (
     _SSM_PROPER_LOCATION_ALIASES,
     _SSM_PROPER_REGION_CODES,
     is_ssm_region_job,
+    normalize_declared_job_location,
 )
 from skillbridge.session.staging import StagedProfile, StagedSkill
 
@@ -61,7 +63,8 @@ def test_region_code_ssm_case_insensitive() -> None:
 def test_region_code_algoma_rejected() -> None:
     """The locked product scope is SSM proper only -- Algoma
     communities never enter the candidate pool even though
-    LOCAL_CITIES (.env:64) admits them for the local-boost radius."""
+    SCCC_INGEST_LOCALITIES (formerly LOCAL_CITIES) admits them for
+    SCCC ingestion."""
     assert is_ssm_region_job({"region_code": "algoma"}) is False
     assert is_ssm_region_job({"region_code": "wawa"}) is False
     assert is_ssm_region_job({"region_code": "blind_river"}) is False
@@ -91,8 +94,8 @@ def test_missing_region_code_falls_back_to_location() -> None:
 
 
 def test_missing_region_code_location_algoma_rejected() -> None:
-    """A naive LOCAL_CITIES check would admit Wawa here. The dedicated
-    alias set MUST NOT include it."""
+    """A naive SCCC_INGEST_LOCALITIES check would admit Wawa here.
+    The dedicated alias set MUST NOT include it."""
     assert is_ssm_region_job({"location": "Wawa, ON"}) is False
     assert is_ssm_region_job({"location": "Blind River"}) is False
     assert is_ssm_region_job({"location": "Chapleau, ON"}) is False
@@ -128,28 +131,58 @@ def test_ssm_substring_in_unrelated_word_rejected() -> None:
     assert is_ssm_region_job({"location": "Cossmington"}) is False
 
 
-def test_ssm_as_standalone_token_still_accepted() -> None:
-    """Word-boundary matching still accepts SSM as a real city token."""
+def test_ssm_as_standalone_token_accepted_after_cleanup() -> None:
+    """Exact-match-after-cleanup accepts SSM as a whole location string
+    or with the cleanup-pipeline suffixes (", ON" / ", Ontario" /
+    "(Remote)").
+
+    Step 1A (2026-07-15) tightening: strings that WRAP the alias in
+    unrelated words (e.g. "SSM Plaza, 123 Main St", "Some place near
+    SSM") are no longer accepted. Those were the pre-Step-1A word-
+    boundary substring admits that admitted "Wawa / SSM" — see
+    test_ssm_wrapped_in_prose_rejected_step_1a below."""
     assert is_ssm_region_job({"location": "SSM"}) is True
     assert is_ssm_region_job({"location": "SSM, ON"}) is True
-    assert is_ssm_region_job({"location": "SSM Plaza, 123 Main St"}) is True
-    assert is_ssm_region_job({"location": "Some place near SSM"}) is True
+    assert is_ssm_region_job({"location": "SSM, Ontario"}) is True
+    assert is_ssm_region_job({"location": "SSM (Remote)"}) is True
 
 
-def test_sault_ste_marie_alias_still_accepted_with_word_boundary() -> None:
-    """Sanity: multi-word aliases keep working under the word-boundary
-    rule. (`\\b` between "marie" and "," / end-of-string is satisfied.)"""
+def test_sault_ste_marie_alias_accepted_with_cleanup_suffixes() -> None:
+    """Sanity: multi-word aliases pass under exact-match-after-cleanup.
+    ", ON" / ", Ontario" / "(Remote)" are stripped BEFORE the alias
+    equality check."""
     assert is_ssm_region_job({"location": "Sault Ste. Marie, ON"}) is True
     assert is_ssm_region_job({"location": "sault ste marie"}) is True
-    assert is_ssm_region_job({"location": "downtown Sault Ste. Marie area"}) is True
+    assert is_ssm_region_job({"location": "Sault Ste. Marie, Ontario"}) is True
+    assert is_ssm_region_job({"location": "Sault Ste. Marie (Remote)"}) is True
+    assert is_ssm_region_job({"location": "  Sault Ste. Marie  "}) is True
 
 
-def test_local_cities_is_not_consulted() -> None:
-    """Audit: ensure the SSM predicate doesn't IMPORT config.LOCAL_CITIES
-    anywhere. Walks the AST so that docstring mentions (which explain
-    *why* the dependency is rejected) don't trip the check. Catches
-    `from config import LOCAL_CITIES`, `from skillbridge... import
-    LOCAL_CITIES`, `config.LOCAL_CITIES`."""
+def test_ssm_wrapped_in_prose_rejected_step_1a() -> None:
+    """Step 1A (2026-07-15): exact-match-after-cleanup rejects strings
+    that wrap the alias in unrelated words. Prior word-boundary
+    substring path admitted these — that path is retired.
+
+    Failure mode this gates: a posting with location text
+    "Wawa / SSM" would have been silently accepted by the pre-Step-1A
+    implementation via `\\bssm\\b` matching inside the string."""
+    assert is_ssm_region_job({"location": "SSM Plaza, 123 Main St"}) is False
+    assert is_ssm_region_job({"location": "Some place near SSM"}) is False
+    assert is_ssm_region_job({"location": "downtown Sault Ste. Marie area"}) is False
+    assert is_ssm_region_job({"location": "Wawa / SSM"}) is False
+    assert is_ssm_region_job({"location": "North of SSM"}) is False
+    assert is_ssm_region_job({"location": "SSM area"}) is False
+
+
+def test_ingest_locality_symbol_is_not_consulted() -> None:
+    """Audit: ensure the SSM predicate doesn't IMPORT the ingestion
+    allowlist symbol under either its current name
+    (SCCC_INGEST_LOCALITIES) or its retired name (LOCAL_CITIES).
+    Walks the AST so that docstring mentions (which explain *why*
+    the dependency is rejected) don't trip the check. Catches
+    `from config import LOCAL_CITIES`, `from config import
+    SCCC_INGEST_LOCALITIES`, `config.LOCAL_CITIES`,
+    `config.SCCC_INGEST_LOCALITIES`."""
     import ast
     import inspect
 
@@ -157,27 +190,31 @@ def test_local_cities_is_not_consulted() -> None:
 
     tree = ast.parse(inspect.getsource(region))
 
+    _FORBIDDEN = {"LOCAL_CITIES", "SCCC_INGEST_LOCALITIES"}
+
     forbidden_imports = []
     forbidden_attrs = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                if alias.name == "LOCAL_CITIES":
-                    forbidden_imports.append(node.module)
+                if alias.name in _FORBIDDEN:
+                    forbidden_imports.append((node.module, alias.name))
         elif isinstance(node, ast.Attribute):
-            if node.attr == "LOCAL_CITIES":
+            if node.attr in _FORBIDDEN:
                 forbidden_attrs.append(ast.dump(node))
         elif isinstance(node, ast.Name):
-            if node.id == "LOCAL_CITIES":
+            if node.id in _FORBIDDEN:
                 forbidden_attrs.append(node.id)
 
     assert not forbidden_imports, (
-        f"match/region.py imported LOCAL_CITIES: {forbidden_imports}. "
-        f"Use the dedicated _SSM_PROPER_LOCATION_ALIASES set instead."
+        f"match/region.py imported the ingestion allowlist symbol: "
+        f"{forbidden_imports}. Use the dedicated "
+        f"_SSM_PROPER_LOCATION_ALIASES set instead."
     )
     assert not forbidden_attrs, (
-        f"match/region.py references LOCAL_CITIES at runtime: "
-        f"{forbidden_attrs}. Use the dedicated alias set instead."
+        f"match/region.py references the ingestion allowlist symbol "
+        f"at runtime: {forbidden_attrs}. Use the dedicated alias set "
+        f"instead."
     )
 
 
@@ -659,3 +696,183 @@ def test_soft_offer_on_no_match_suppressed_without_evidence() -> None:
     """A present_no_match outcome without usable evidence cannot
     surface adjacency -- we'd have nothing to recommend."""
     assert should_emit_soft_offer_on_no_match(_staged_with_skills([])) is False
+
+
+# =========================================================================
+# Step 1A (2026-07-15) — normalize_declared_job_location
+# =========================================================================
+# Populates `core.job_posting.normalized_job_location` at ingest and
+# backfill time. Shares `_SSM_PROPER_LOCATION_ALIASES` with
+# `is_ssm_region_job` but uses EXACT-match-after-cleanup semantics —
+# not word-boundary substring search. See docs/matching-revise/
+# step-1-source-data-integrity.md §2c.
+
+
+# ---- SSM alias exact matches after cleanup ----
+@pytest.mark.parametrize("raw", [
+    "Sault Ste. Marie",
+    "Sault Ste Marie",
+    "SAULT STE. MARIE",
+    "sault ste. marie",
+    "SSM",
+    "ssm",
+    "  Sault Ste. Marie  ",  # whitespace collapsed
+])
+def test_normalize_ssm_alias_exact_match(raw: str) -> None:
+    assert normalize_declared_job_location(raw) == ("Sault Ste. Marie", False)
+
+
+# ---- Cleanup suffix stripping ----
+@pytest.mark.parametrize("raw", [
+    "Sault Ste. Marie, ON",
+    "Sault Ste. Marie, Ontario",
+    "SSM, ON",
+    "ssm, ontario",
+])
+def test_normalize_ssm_suffix_stripped(raw: str) -> None:
+    assert normalize_declared_job_location(raw) == ("Sault Ste. Marie", False)
+
+
+# ---- Remote flag ----
+@pytest.mark.parametrize("raw", [
+    "Sault Ste. Marie (Remote)",
+    "sault ste. marie (remote)",
+    "SSM (Remote)",
+])
+def test_normalize_remote_flag_stripped_and_set(raw: str) -> None:
+    assert normalize_declared_job_location(raw) == ("Sault Ste. Marie", True)
+
+
+def test_normalize_remote_and_suffix_both_stripped() -> None:
+    """Remote strip happens BEFORE ", ON" strip so both are handled."""
+    assert normalize_declared_job_location("Sault Ste. Marie, ON (Remote)") == (
+        "Sault Ste. Marie", True,
+    )
+
+
+# ---- Non-SSM cities: truthful normalization, not SSM ----
+@pytest.mark.parametrize("raw, expected", [
+    ("Wawa", "Wawa"),
+    ("wawa", "Wawa"),
+    ("Wawa, Ontario", "Wawa"),
+    ("Elliot Lake", "Elliot Lake"),
+    ("Blind River", "Blind River"),
+    ("Chapleau, ON", "Chapleau"),
+])
+def test_normalize_non_ssm_city_truthful(raw: str, expected: str) -> None:
+    assert normalize_declared_job_location(raw) == (expected, False)
+
+
+# ---- Substring / word-boundary false-positive prevention ----
+# These are the exact-match-after-cleanup load-bearing negatives.
+@pytest.mark.parametrize("raw", [
+    "Wawa / SSM",           # pre-Step-1A word-boundary would admit
+    "North of SSM",         # ditto
+    "SSM area",             # ditto
+    "SSM Plaza, 123 Main",  # ditto
+    "Rossmore, ON",         # contains "ssm" as substring
+    "Some place near SSM",  # pre-Step-1A wrap
+    "downtown Sault Ste. Marie area",  # wrap around canonical alias
+    "Mossmoor Drive",       # contains "ssm" as substring
+])
+def test_normalize_substring_and_wrap_rejected_as_ssm(raw: str) -> None:
+    """Load-bearing: exact-match-after-cleanup rejects strings where
+    the alias is a substring or is wrapped in unrelated words.
+    Documented in Step 1A spec §2c."""
+    normalized, remote = normalize_declared_job_location(raw)
+    assert normalized != "Sault Ste. Marie"
+    assert remote is False
+
+
+# ---- Fuzzy / dropped-alias negatives ----
+@pytest.mark.parametrize("raw", [
+    "Sault Ste. Maria",     # fuzzy — not accepted
+    "Ste. Marie",           # substring of the alias
+    "Sault",                # dropped alias (evidence-driven adds only)
+    "Sault Sainte Marie",   # dropped alias
+])
+def test_normalize_fuzzy_and_dropped_aliases_not_ssm(raw: str) -> None:
+    normalized, _remote = normalize_declared_job_location(raw)
+    assert normalized != "Sault Ste. Marie"
+
+
+# ---- Blank / non-string inputs ----
+@pytest.mark.parametrize("raw", [None, "", "   ", "\t\n"])
+def test_normalize_blank_or_nonstring_returns_none(raw) -> None:
+    assert normalize_declared_job_location(raw) == (None, False)
+
+
+def test_normalize_nonstring_returns_none() -> None:
+    assert normalize_declared_job_location(123) == (None, False)
+    assert normalize_declared_job_location(["Sault"]) == (None, False)
+
+
+# ---- Bidirectional equivalence with is_ssm_region_job (Step 1A §4a) ----
+# For every location-only input (no region_code), the two functions
+# MUST agree on SSM classification. Prevents drift between the ingest-
+# time canonicalizer and the runtime predicate.
+_EQUIVALENCE_FIXTURES: list[str | None] = [
+    # SSM aliases
+    "Sault Ste. Marie",
+    "Sault Ste Marie",
+    "SSM",
+    "SAULT STE. MARIE",
+    "Sault Ste. Marie, ON",
+    "Sault Ste. Marie, Ontario",
+    "Sault Ste. Marie (Remote)",
+    "Sault Ste. Marie, ON (Remote)",
+    "  sault ste. marie  ",
+    # Non-SSM cities
+    "Wawa",
+    "Wawa, Ontario",
+    "Elliot Lake",
+    "Blind River",
+    "Chapleau",
+    # Substring / word-boundary would-have-admitted
+    "Wawa / SSM",
+    "North of SSM",
+    "SSM area",
+    "SSM Plaza, 123 Main St",
+    "Rossmore, Ontario",
+    "Some place near SSM",
+    "downtown Sault Ste. Marie area",
+    # Fuzzy / dropped aliases
+    "Sault Ste. Maria",
+    "Ste. Marie",
+    "Sault",
+    "Sault Sainte Marie",
+    # Blank / None
+    None,
+    "",
+    "   ",
+]
+
+
+@pytest.mark.parametrize("raw", _EQUIVALENCE_FIXTURES)
+def test_normalization_and_predicate_agree(raw) -> None:
+    """Load-bearing bidirectional equivalence: for any location-only
+    input (no region_code), normalize_declared_job_location returning
+    "Sault Ste. Marie" MUST equal is_ssm_region_job returning True."""
+    normalized, _remote = normalize_declared_job_location(raw)
+    from_normalize = normalized == "Sault Ste. Marie"
+    from_predicate = is_ssm_region_job({"location": raw})
+    assert from_normalize == from_predicate, (
+        f"drift for raw={raw!r}: "
+        f"normalize→{from_normalize}, is_ssm_region_job→{from_predicate}"
+    )
+
+
+# ---- Region-code precedence is preserved (does NOT go through normalize) ----
+def test_region_code_precedence_bypasses_normalize() -> None:
+    """When region_code is set (verified SSM CSD), is_ssm_region_job
+    returns True regardless of location string. That path is
+    exclusive to is_ssm_region_job — normalize_declared_job_location
+    doesn't consult region codes."""
+    # Verified SSM CSD → True even if location wraps SSM in prose.
+    assert is_ssm_region_job({
+        "region_code": "3557011",
+        "location": "SSM Plaza, 123 Main St",  # wrap that normalize rejects
+    }) is True
+    # normalize itself would reject the same string.
+    normalized, _ = normalize_declared_job_location("SSM Plaza, 123 Main St")
+    assert normalized != "Sault Ste. Marie"

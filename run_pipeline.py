@@ -155,6 +155,22 @@ def main() -> int:
     parser.add_argument("--skip", default="", help="comma-separated step names to skip")
     parser.add_argument("--limit", type=int, default=None,
                         help="extraction batch limit")
+    # Step 1A (2026-07-15) source-data-integrity backfill.
+    parser.add_argument(
+        "--step1a-backfill", action="store_true",
+        help="re-normalize every core.job_posting row from the latest "
+             "raw.job_posting payload, populating description_full / "
+             "description_evidence_status / source_location_text / "
+             "normalized_job_location / location_resolution_status / "
+             "location_provenance. Idempotent — safe to run twice.",
+    )
+    parser.add_argument(
+        "--step1a-backfill-dry-run", action="store_true",
+        help="with --step1a-backfill, run classification without "
+             "calling upsert_job. Prints the distribution of "
+             "location_resolution_status and description_evidence_"
+             "status the backfill WOULD produce.",
+    )
     args = parser.parse_args()
 
     if args.schema:
@@ -167,6 +183,12 @@ def main() -> int:
     if args.inspect_noc_coverage:
         from skillbridge.match.inspect_noc import cli_inspect_noc_coverage
         return cli_inspect_noc_coverage(strict=args.strict_noc_coverage)
+
+    if args.step1a_backfill:
+        from skillbridge.pipeline.step1a_backfill import run_step1a_backfill
+        stats = run_step1a_backfill(dry_run=args.step1a_backfill_dry_run)
+        log.info("Step 1A backfill complete: %s", stats)
+        return 0
 
     skip = {s.strip() for s in args.skip.split(",") if s.strip()}
 

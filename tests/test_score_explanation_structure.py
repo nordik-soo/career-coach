@@ -105,7 +105,10 @@ SKILL_BASE_KEYS = {
     "preferred_match_ratio", "preferred_weight",
 }
 BOOSTS_KEYS = {
-    "location", "recency", "target_role", "target_noc_match",
+    # "location" retired in Step 1A cutover 2026-07-16 — SSM-only
+    # v_current_job guarantees every candidate is SSM-verified, so
+    # location is no longer a differentiating fit signal.
+    "recency", "target_role", "target_noc_match",
     "work_type_fit", "shift_fit",
 }
 TITLE_MATCH_KEYS = {"applied", "raw_similarity"}

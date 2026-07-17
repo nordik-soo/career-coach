@@ -64,14 +64,33 @@ class SaultAreaHospitalConnector(EmployerConnector):
             if not sid or sid in seen:
                 continue
             seen.add(sid)
+            # Step 1A (2026-07-15) honest-handling rule for employer-
+            # specific connectors: employer identity does not prove a
+            # posting's location. The scraper captures only a title +
+            # a card-level HTML snippet — no per-posting location and
+            # not enough text for description provenance. Emit missing
+            # on both axes; the posting stays outside the live SSM
+            # market until per-posting extraction ships.
             yield NormalizedJob(
                 source=self.source_name,
                 source_job_id=sid,
                 title=title,
                 employer="Sault Area Hospital",
-                location="Sault Ste. Marie",
+                # Legacy `location` and `description` derived by
+                # upsert_job. NEVER hardcode "Sault Ste. Marie" here.
                 url=self._abs_url(href),
                 posted_date=None,
+                # Step 1A description axis.
+                description_full=None,
+                description_excerpt=None,
+                description_evidence_status="missing",
+                # Step 1A location axis. No per-posting location signal
+                # from the card scraper. Honest posture: missing.
+                source_location_text=None,
+                source_coordinates=None,
+                normalized_job_location=None,
+                location_resolution_status="missing",
+                location_provenance="none",
                 raw_payload={"snippet": str(card)[:1000]},
             )
 

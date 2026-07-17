@@ -64,12 +64,29 @@ class CityOfSSMHRConnector(EmployerConnector):
             if not sid or sid in seen:
                 continue
             seen.add(sid)
+            # Step 1A (2026-07-15) honest-handling rule: employer
+            # identity does not prove a posting's location. The
+            # scraper captures only a title + card snippet with no
+            # per-posting location or description. Emit missing on
+            # both axes; posting stays outside the live SSM market
+            # until per-posting extraction ships.
             yield NormalizedJob(
                 source=self.source_name,
                 source_job_id=sid,
                 title=title,
                 employer="City of Sault Ste. Marie",
-                location="Sault Ste. Marie",
+                # Legacy `location` / `description` derived by
+                # upsert_job. NEVER hardcode "Sault Ste. Marie".
                 url=href if (href and href.startswith("http")) else href,
+                # Step 1A description axis.
+                description_full=None,
+                description_excerpt=None,
+                description_evidence_status="missing",
+                # Step 1A location axis.
+                source_location_text=None,
+                source_coordinates=None,
+                normalized_job_location=None,
+                location_resolution_status="missing",
+                location_provenance="none",
                 raw_payload={"snippet": str(card)[:1000]},
             )

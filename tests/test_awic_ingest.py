@@ -128,6 +128,13 @@ class TestNormalizeFeature:
     fixture, not just parameterizing existing features."""
 
     def test_real_ssm_valid_noc_yields_populated_job(self, fixture_payload):
+        """Step 1A (2026-07-15) contract change: AWIC never hardcodes
+        `location = "Sault Ste. Marie"`. Legacy `location` is None
+        because normalization from geometry alone is not honest;
+        `normalized_job_location` is None and status is 'unresolved'
+        (geometry present but not authoritative). The posting stays
+        outside the live SSM market until Step 1B detail-page fetch
+        supplies a source-declared location."""
         ft = _feature_by_case(fixture_payload, "real_ssm_valid_noc")
         job, drop_reason, noc_provided = _normalize_awic_geojson_feature(ft)
 
@@ -137,20 +144,41 @@ class TestNormalizeFeature:
         assert job.source == "awic_jobs"          # locked contract
         assert job.source_job_id == "8301829"     # str(post_id)
         assert job.noc_code == "31203"            # passed through
-        assert job.location == "Sault Ste. Marie"  # canonical post-filter
+        # Step 1A: NO hardcoded fallback location.
+        assert job.location is None
+        assert job.source_location_text is None
+        assert job.normalized_job_location is None
+        assert job.location_resolution_status == "unresolved"
+        assert job.location_provenance == "geometry"
+        assert job.source_coordinates is not None  # geometry preserved
         assert job.title  # non-empty
         assert job.employer == "Sault Area Hospital Foundation"
         assert job.url and job.url.startswith("https://")
-        assert job.description  # excerpt populated
+        # Description: excerpt-only under Step 1A until 1B detail fetch.
+        assert job.description_full is None
+        assert job.description_excerpt  # excerpt populated
+        assert job.description_evidence_status == "excerpt_only"
         assert job.raw_payload["source"] == "awic_geojson_v1"
         assert job.raw_payload["feature"] is ft   # full audit copy
 
-    def test_real_outside_ssm_dropped_by_bbox(self, fixture_payload):
+    def test_real_outside_ssm_ingested_as_unresolved(self, fixture_payload):
+        """Step 1A (2026-07-15): outside-SSM-bbox is no longer a drop
+        reason. The pre-Step-1A logic used geometry as an ingestion
+        gate; Step 1A says geometry is not authoritative for job
+        location (verified: Wawa job has SSM coordinates). Under Step
+        1A, outside-bbox features are ingested with
+        location_resolution_status='unresolved' and stay outside
+        v_current_job because the view requires resolved SSM."""
         ft = _feature_by_case(fixture_payload, "real_outside_ssm")
         job, drop_reason, noc_provided = _normalize_awic_geojson_feature(ft)
-        assert job is None
-        assert drop_reason == "outside_ssm"
-        assert noc_provided is False
+        assert job is not None
+        assert drop_reason is None
+        # Coordinates preserved as evidence, but never treated as
+        # authoritative for job location.
+        assert job.source_coordinates is not None
+        assert job.normalized_job_location is None
+        assert job.location_resolution_status == "unresolved"
+        assert job.location_provenance == "geometry"
 
     def test_real_ssm_invalid_noc_kept_but_no_noc(self, fixture_payload):
         """Missing/invalid nocs_2021 => NormalizedJob with noc_code=None,
@@ -163,36 +191,147 @@ class TestNormalizeFeature:
         assert job is not None
         assert job.noc_code is None
         assert noc_provided is False
-        # Still SSM-canonical + source-stamped correctly.
+        # Step 1A: NO hardcoded fallback location.
         assert job.source == "awic_jobs"
-        assert job.location == "Sault Ste. Marie"
+        assert job.location is None
+        assert job.source_location_text is None
+        assert job.normalized_job_location is None
+        assert job.location_resolution_status == "unresolved"
+        assert job.location_provenance == "geometry"
 
-    def test_synth_missing_coords_dropped_by_coords(self, fixture_payload):
+    def test_synth_missing_coords_ingested_as_missing(self, fixture_payload):
+        """Step 1A (2026-07-15): missing coordinates is no longer a
+        drop reason. Feature is ingested with
+        location_resolution_status='missing' and provenance='none'.
+        Row stays outside v_current_job (unresolved location)."""
         ft = _feature_by_case(fixture_payload, "synth_missing_coords")
         job, drop_reason, noc_provided = _normalize_awic_geojson_feature(ft)
-        assert job is None
-        assert drop_reason == "no_coords"
-        assert noc_provided is False
+        assert job is not None
+        assert drop_reason is None
+        assert job.source_coordinates is None
+        assert job.location_resolution_status == "missing"
+        assert job.location_provenance == "none"
 
     def test_malformed_feature_dropped(self):
-        """Not from the fixture (fixture only has valid GeoJSON shapes).
-        These synthetic cases pin the defensive drop-reason wiring."""
+        """Step 1A (2026-07-15): only genuine data-shape defects drop.
+        Non-dict feature and missing post_id/title. Missing geometry
+        is now an ingest with location_resolution_status='missing'."""
         # Not a dict
         j, r, n = _normalize_awic_geojson_feature("not a feature")
         assert j is None and r == "malformed" and n is False
-        # Missing geometry entirely => no_coords (geometry key defaults to {})
+        # Missing geometry entirely: pre-Step-1A dropped as no_coords;
+        # Step 1A ingests with title/id present. When BOTH properties
+        # AND geometry are absent, the missing-title is what drops.
         j, r, n = _normalize_awic_geojson_feature({"properties": {}})
-        assert j is None and r == "no_coords"
+        assert j is None and r == "malformed"
         # Coords present + in-bbox, but missing post_id/title
         good_geom = {"type": "Point", "coordinates": [-84.32, 46.54]}
         j, r, n = _normalize_awic_geojson_feature({
             "geometry": good_geom, "properties": {"post_id": 1},
         })
         assert j is None and r == "malformed" and n is False
+
+    def test_missing_geometry_with_valid_title_ingests(self):
+        """Step 1A regression: feature without geometry but with valid
+        post_id + title now INGESTS with location_resolution_status
+        ='missing', not dropped."""
         j, r, n = _normalize_awic_geojson_feature({
-            "geometry": good_geom, "properties": {"job_title": "x"},
+            "properties": {"post_id": 999, "job_title": "Test Role"},
         })
-        assert j is None and r == "malformed" and n is False
+        assert j is not None
+        assert r is None
+        assert j.source_coordinates is None
+        assert j.location_resolution_status == "missing"
+        assert j.location_provenance == "none"
+
+    def test_malformed_geometry_ingests_as_invalid(self):
+        """Step 1A: malformed coordinates (out-of-range latitude) is
+        now an ingest, not a drop. Row stays outside v_current_job."""
+        j, r, n = _normalize_awic_geojson_feature({
+            "geometry": {"type": "Point", "coordinates": [-84.32, 999.0]},
+            "properties": {"post_id": 1, "job_title": "Test Role"},
+        })
+        assert j is not None
+        assert r is None
+        assert j.source_coordinates is None  # invalid rejected
+        assert j.location_resolution_status == "invalid"
+        assert j.location_provenance == "geometry"
+
+    def test_tuple_coordinates_rejected(self):
+        """Step 1A §2d: GeoJSON contract requires JSON array (list).
+        Tuples are rejected as invalid — spec correction 2026-07-16."""
+        from skillbridge.ingest.partners import _validate_geojson_coordinates
+        coords_list, status = _validate_geojson_coordinates(
+            (-84.32, 46.54)  # tuple, not list
+        )
+        assert coords_list is None
+        assert status == "invalid"
+
+    def test_three_dimensional_coordinates_preserved(self):
+        """Step 1A §2d: 3-D GeoJSON points ([lon, lat, altitude]) are
+        valid — extras preserved, ignored for validation."""
+        from skillbridge.ingest.partners import _validate_geojson_coordinates
+        coords_list, status = _validate_geojson_coordinates(
+            [-84.32, 46.54, 150.0]
+        )
+        assert status == "valid"
+        assert coords_list == [-84.32, 46.54, 150.0]
+
+    def test_non_string_excerpt_produces_parse_error(self):
+        """Step 1A §2g: non-string description input must produce
+        parse_error, not be silently stringified."""
+        j, r, n = _normalize_awic_geojson_feature({
+            "properties": {
+                "post_id": 1,
+                "job_title": "Test",
+                "excerpt": {"nested": "dict"},  # non-string
+            },
+        })
+        assert j is not None
+        assert j.description_excerpt is None
+        assert j.description_evidence_status == "parse_error"
+
+    def test_non_dict_geometry_ingests_as_invalid_not_missing(self):
+        """Step 1A correction 2026-07-16: geometry supplied but not a
+        dict (e.g., a string like 'bad-shape') was previously
+        collapsed to missing/none. The honest classification is
+        invalid/geometry — source attempted to supply geometry, we
+        couldn't use its shape. Distinguishing this from truly-
+        missing geometry is load-bearing for the upcoming historical
+        backfill, which needs to tell absent data apart from
+        corrupted data."""
+        j, r, n = _normalize_awic_geojson_feature({
+            "geometry": "bad-shape",  # non-dict — attempted but broken
+            "properties": {"post_id": 1, "job_title": "Test Role"},
+        })
+        assert j is not None
+        assert r is None
+        assert j.source_coordinates is None
+        assert j.location_resolution_status == "invalid"
+        assert j.location_provenance == "geometry"
+
+    def test_geometry_none_ingests_as_missing(self):
+        """Anti-regression alongside the above: geometry key explicitly
+        set to None is genuinely missing, not invalid."""
+        j, r, n = _normalize_awic_geojson_feature({
+            "geometry": None,
+            "properties": {"post_id": 1, "job_title": "Test Role"},
+        })
+        assert j is not None
+        assert j.source_coordinates is None
+        assert j.location_resolution_status == "missing"
+        assert j.location_provenance == "none"
+
+    def test_geometry_number_ingests_as_invalid(self):
+        """Non-dict types other than string also produce invalid."""
+        j, r, n = _normalize_awic_geojson_feature({
+            "geometry": 42,  # numeric — clearly not a geometry object
+            "properties": {"post_id": 1, "job_title": "Test Role"},
+        })
+        assert j is not None
+        assert j.source_coordinates is None
+        assert j.location_resolution_status == "invalid"
+        assert j.location_provenance == "geometry"
 
 
 class TestJobBankUrlProvenance:
@@ -283,17 +422,24 @@ class TestFetchGeoJson:
         ):
             jobs = list(_fetch_awic_geojson("https://example.invalid/"))
 
-        # 2 yielded (real_ssm_valid_noc + real_ssm_invalid_noc).
-        assert len(jobs) == 2
+        # Step 1A (2026-07-15): pre-Step-1A logic dropped 2 features
+        # (1 outside-bbox + 1 missing-coords) and yielded 2. Post-Step-
+        # 1A all 4 features ingest — coordinate-based drops removed
+        # per spec §2f. Rows stay outside v_current_job via the view's
+        # SSM eligibility clauses; the connector is now honest about
+        # what it saw.
+        assert len(jobs) == 4
         assert all(j.source == "awic_jobs" for j in jobs)
         yielded_ids = {j.source_job_id for j in jobs}
-        assert yielded_ids == {"8301829", "8705234"}
+        # Includes the outside-bbox and missing-coords rows now.
+        assert "8301829" in yielded_ids
+        assert "8705234" in yielded_ids
 
         # Verify User-Agent was sent on the request.
         assert len(transport.calls) == 1
         assert transport.calls[0].headers.get("user-agent") == AWIC_JOBS_USER_AGENT
 
-        # Counter emission: last INFO record from partners logger.
+        # Counter emission: post-Step-1A shape.
         counter_records = [
             r for r in caplog.records
             if r.levelno == logging.INFO
@@ -302,11 +448,11 @@ class TestFetchGeoJson:
         assert len(counter_records) == 1
         msg = counter_records[0].getMessage()
         assert "fetched=4" in msg
-        assert "after_ssm_filter=2" in msg
-        assert "dropped_outside_ssm=1" in msg
-        assert "dropped_no_coords=1" in msg
-        assert "with_noc_provided=1" in msg
-        assert "needing_noc_backfill=1" in msg
+        assert "yielded=4" in msg
+        assert "dropped_malformed=0" in msg
+        # Legacy backward-compat counters (always 0 under Step 1A).
+        assert "dropped_no_coords=0" in msg
+        assert "dropped_outside_ssm=0" in msg
 
     def test_non_200_response_returns_no_jobs(self, monkeypatch, caplog):
         transport = _MockTransport(500, {})
@@ -466,18 +612,22 @@ class TestOrchestratorIntegration:
 
     DB-free: write_raw_job, upsert_job, sweep_missing_jobs are stubbed
     at the point where the orchestrator imports them. HTTP-free: the
-    fetch client uses _MockTransport serving the fixture, so the SSM
-    filter runs for real and only the two SSM-valid fixture jobs
-    reach the DB boundary.
+    fetch client uses _MockTransport serving the fixture.
+
+    Step 1A (2026-07-15) contract: the connector no longer applies
+    an SSM-bbox ingestion filter. All four fixture features reach
+    the persistence boundary; their location-resolution status
+    (unresolved / missing / invalid) is set at normalize time and
+    v_current_job's SSM-eligibility clauses determine which reach
+    the live matcher.
 
     This is the load-bearing wiring test for Step 3: it fails if
-    AWICJobsConnector is dropped from ALL_CONNECTORS, if the
+    AWICJobsConnector is dropped from ALL_CONNECTORS, or if the
     orchestrator ever stops calling write_raw_job / upsert_job /
-    sweep_missing_jobs for a partner connector, or if the SSM filter
-    lets non-SSM postings through to the boundary.
+    sweep_missing_jobs for a partner connector.
     """
 
-    def test_step_ingest_jobs_upserts_only_ssm_features(
+    def test_step_ingest_jobs_upserts_all_fixture_features(
         self, monkeypatch, fixture_payload,
     ):
         # -- HTTP boundary: fixture served via MockTransport.
@@ -543,39 +693,42 @@ class TestOrchestratorIntegration:
         from skillbridge.pipeline.orchestrator import step_ingest_jobs
         result = step_ingest_jobs()
 
-        # -- Boundary was hit for each SSM survivor and no one else.
-        assert len(raw_calls) == 2, (
-            f"expected write_raw_job called twice (2 SSM survivors); "
-            f"got {len(raw_calls)}"
+        # Step 1A (2026-07-15): all 4 features ingest post-Step-1A.
+        # Coordinate-based drop paths (no_coords, outside_ssm)
+        # removed per spec §2f — geometry is not authoritative for
+        # job location. Rows stay outside v_current_job via the
+        # view's SSM eligibility clauses; ingestion is honest about
+        # what it saw.
+        assert len(raw_calls) == 4, (
+            f"expected write_raw_job called 4 times (all features "
+            f"ingested under Step 1A); got {len(raw_calls)}"
         )
-        assert len(upsert_calls) == 2, (
-            f"expected upsert_job called twice; got {len(upsert_calls)}"
+        assert len(upsert_calls) == 4, (
+            f"expected upsert_job called 4 times; got {len(upsert_calls)}"
         )
 
-        # -- Every job that reached the boundary carries source='awic_jobs'.
+        # Every job carries source='awic_jobs'.
         assert all(j.source == "awic_jobs" for j in raw_calls)
         assert all(j.source == "awic_jobs" for j in upsert_calls)
 
-        # -- Only the two SSM survivors reached upsert. Outside-SSM
-        #    (post_id 8827928, Chapleau) and no-coords (post_id 99999901)
-        #    were dropped inside the connector's SSM filter and NEVER
-        #    reached the DB boundary.
+        # All 4 IDs reach the boundary now (was 2 pre-Step-1A).
         upserted_ids = {j.source_job_id for j in upsert_calls}
-        assert upserted_ids == {"8301829", "8705234"}
-        assert "8827928" not in upserted_ids   # outside SSM bbox
-        assert "99999901" not in upserted_ids  # missing coordinates
+        assert "8301829" in upserted_ids
+        assert "8705234" in upserted_ids
+        assert "8827928" in upserted_ids   # outside SSM bbox — now ingested
+        assert "99999901" in upserted_ids  # missing coordinates — now ingested
 
         raw_ids = {j.source_job_id for j in raw_calls}
-        assert raw_ids == {"8301829", "8705234"}
+        assert raw_ids == upserted_ids
 
-        # -- sweep_missing_jobs called once with the AWIC source name
-        #    and the two survivor IDs as the seen set.
+        # sweep_missing_jobs called once with all 4 seen IDs.
         assert len(sweep_calls) == 1
         source_arg, seen_ids_arg = sweep_calls[0]
         assert source_arg == "awic_jobs"
-        assert seen_ids_arg == {"8301829", "8705234"}
+        assert seen_ids_arg == upserted_ids
 
         # -- Orchestrator returns per-source counts keyed by source_name.
         assert "awic_jobs" in result
-        assert result["awic_jobs"]["upserted"] == 2
+        # Step 1A: all 4 features ingest (was 2 pre-Step-1A).
+        assert result["awic_jobs"]["upserted"] == 4
         assert result["awic_jobs"]["deactivated"] == 0

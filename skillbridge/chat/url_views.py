@@ -170,7 +170,11 @@ class ScoreExplanationView:
     title_match_similarity: float | None
     title_match_override: bool | None
     recency_days: int | None
-    location_boosted: bool | None
+    # location_boosted retired in Step 1A cutover 2026-07-16 alongside
+    # _location_boost. The SSM-only v_current_job view now guarantees
+    # every candidate row is SSM-verified, so this field carried no
+    # information. Removed from the projector, the serializer allow-
+    # list, and the responder's grounding-fields allowlist.
     work_type_fit: str | None
     shift_fit: str | None
     credential_warning_present: bool | None
@@ -843,7 +847,6 @@ def _project_score_explanation(
             se.get("title_match_override"),
         ),
         recency_days=_project_int_or_none(se.get("recency_days")),
-        location_boosted=_project_bool_or_none(se.get("location_boosted")),
         work_type_fit=_project_str_or_none(se.get("work_type_fit")),
         shift_fit=_project_str_or_none(se.get("shift_fit")),
         credential_warning_present=_project_bool_or_none(
@@ -1762,7 +1765,7 @@ def serialize_score_explanation_for_prompt(
         "skill_match_ratio", "required_match_ratio", "required_total",
         "preferred_match_ratio", "preferred_total",
         "title_match_similarity", "title_match_override",
-        "recency_days", "location_boosted", "work_type_fit", "shift_fit",
+        "recency_days", "work_type_fit", "shift_fit",
         "credential_warning_present", "work_type_user", "work_type_job",
         "band_capped_by_credential", "band_capped_by_no_experience",
         "band_capped_by_work_type_mismatch",

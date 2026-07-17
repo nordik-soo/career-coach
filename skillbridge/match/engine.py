@@ -1,10 +1,16 @@
-"""JobMatchEngine v1.0.0 — the core of the SkillBridge product.
+"""JobMatchEngine (see versions.py for the shipped version string).
 
 Auditable, deterministic, config-driven. Formula:
   skill_score = matched_top_n / required_top_n
   + recency boost (if posted_date within recency_boost_days)
-  + location boost (if region matches local CSD)
   + small target-role similarity boost
+  + NOC-match / work-type / shift-fit adjustments
+
+Step 1A cutover 2026-07-16: `+ location boost` retired. The SSM-only
+v_current_job view now guarantees every candidate row is SSM-verified,
+so location was manufacturing false differentiation between rows that
+are already in the same market. This module docstring's version tag
+is intentionally not hardcoded — versions.py owns that string.
 
 Eligibility:
   - Job skills below min_extraction_confidence are dropped.
@@ -34,7 +40,6 @@ from rapidfuzz import fuzz
 
 from config import (
     EMBEDDING_MODEL_VERSION,
-    LOCAL_CITIES,
     MATCH,
     MIN_EXTRACTION_CONFIDENCE,
     SEMANTIC_COSINE_THRESHOLD,
@@ -49,7 +54,10 @@ from skillbridge.match.alignment import (
     derive_user_skill_sets,
     is_normalized_equal,
 )
-from skillbridge.match.occupation import resolve_title_to_noc
+from skillbridge.match.occupation import (
+    resolve_title_to_noc,
+    resolve_title_to_noc_with_state,
+)
 from skillbridge.session.staging import StagedProfile
 from skillbridge.versions import ENGINE_VERSION_JOB_MATCH
 
@@ -883,21 +891,6 @@ def _apply_hard_gates(
     return band, score
 
 
-def _location_boost(job_location: str | None, region_code: str | None) -> float:
-    """Boost jobs whose location resolves to a city in LOCAL_CITIES.
-
-    Post-PR-7A: every job is SSM-native by source approval, so this boost
-    no longer discriminates "local vs national" (national isn't allowed).
-    It still differentiates "Sault Ste. Marie proper" from nearby Algoma
-    communities (Wawa, Blind River, etc.) when the user has signalled a
-    preferred location.
-    """
-    loc = (job_location or "").lower()
-    if any(city in loc for city in LOCAL_CITIES):
-        return MATCH.location_boost_local_csd
-    return 0.0
-
-
 def _recency_boost(posted: date | None) -> float:
     if not posted:
         return 0.0
@@ -1282,9 +1275,6 @@ def _score_one_job(
                 ),
                 "title_match_override": True,
                 "recency_days": recency_days,
-                "location_boosted": (
-                    _location_boost(job.get("location"), job.get("region_code")) > 0
-                ),
                 "work_type_fit": "no_signal",
                 "shift_fit": "no_signal",
                 "credential_warning_present": bool(credential_warning),
@@ -1469,7 +1459,9 @@ def _score_one_job(
     # "your forklift and inventory line up with the top requirements"
     # (quoting matched_skills) instead of inventing "because Sault employers
     # value warehouse experience" (no grounded source).
-    loc_boost = _location_boost(job.get("location"), job.get("region_code"))
+    # (Step 1A cutover 2026-07-16: _location_boost retired. The SSM-only
+    # v_current_job view now guarantees every candidate row is SSM-
+    # verified — location is no longer a differentiating fit signal.)
     rec_boost = _recency_boost(job.get("posted_date"))
     role_boost = _target_role_boost(job["title"], profile.get("target_role_text"))
     # Step 2 occupation-match boost. Independent of role_boost (which is
@@ -1481,7 +1473,7 @@ def _score_one_job(
                             profile.get("work_type_preference"))
     sh_fit = _shift_fit(job["title"], job.get("description"),
                         profile.get("shift_preference"))
-    boost = loc_boost + rec_boost + role_boost + noc_boost + wt_fit + sh_fit
+    boost = rec_boost + role_boost + noc_boost + wt_fit + sh_fit
 
     # work_type_fit can be negative; clamp the floor to 0 so negative boosts
     # don't drop us below the skill-match base.
@@ -1581,7 +1573,6 @@ def _score_one_job(
         "title_match_similarity": round(title_sim / 100.0, 3) if target_role else None,
         "title_match_override": title_match_override,
         "recency_days": recency_days,
-        "location_boosted": loc_boost > 0,
         "work_type_fit": (
             "matched" if wt_fit > 0
             else ("mismatched" if wt_fit < 0 else "no_signal")
@@ -1601,7 +1592,6 @@ def _score_one_job(
                 "preferred_weight": _PREF_WEIGHT,
             },
             "boosts": {
-                "location": round(loc_boost, 3),
                 "recency": round(rec_boost, 3),
                 "target_role": round(role_boost, 3),
                 "target_noc_match": round(noc_boost, 3),
@@ -1774,34 +1764,117 @@ def compute_matches_in_memory(staged: StagedProfile, top: int = 5) -> list[Match
 
     Reads jobs/skills/regulated_occupations from Postgres but writes nothing
     user-specific. Used by the chat handler on the pre-consent path.
+
+    Execution order (preserved from pre-Doc-16 behavior):
+      1. build_user_skill_rows / derive_user_skill_sets
+      2. resolve target NOC (legacy state-less resolver)
+      3. embed / fetch / score
+
+    This ordering matters because malformed `staged.skills` fails at
+    step 1 before any DB access. Reordering (e.g. resolve first)
+    would change exception precedence and side effects; that variant
+    is v2 (Doc 16), NOT the legacy contract.
     """
-    # AR-9.feat.coach-tiers CP1: UserSkillRow is the authority. Sets
-    # the matcher consumes are derived from rows so scoring and
-    # attribution cannot disagree about which user skills were
-    # evidence-eligible this turn.
+    # Step 1 (preserved): skill preparation happens FIRST.
     user_rows = build_user_skill_rows(staged.skills)
     user_skill_ids, user_skill_names, user_skill_names_canon = (
         derive_user_skill_sets(user_rows)
     )
 
-    # Step 2: resolve target_role_text -> NOC once per match-batch and
-    # cache on the staged profile. Subsequent turns with the same role
-    # skip the DB round-trip. Returns None when the resolver has nothing
-    # (empty occupation_title_synonym table or unresolvable title) --
-    # _target_noc_boost handles that gracefully (boost = 0).
+    # Step 2 (preserved): resolve target_role_text -> NOC once per
+    # match-batch and cache on the staged profile. Returns None when
+    # the resolver has nothing (empty occupation_title_synonym table
+    # or unresolvable title) -- _target_noc_boost handles that
+    # gracefully (boost = 0).
     if staged.target_role_text and not staged.target_noc:
         staged.target_noc = resolve_title_to_noc(staged.target_role_text)
 
-    # Step 5d: encode user skills ONCE per match-batch (~150ms for ~30
-    # skills) so per-job semantic comparisons reduce to a single matrix
-    # multiply. The matrix is built from `user_rows` IN ROW ORDER so
-    # the semantic-argmax index maps directly back to user_rows[i].text
-    # for attribution. None when sentence-transformers is missing OR
-    # the user has no skills.
+    # Step 3 (preserved): shared scoring loop.
+    matches, _fetched = _score_prepared_jobs(
+        staged, top,
+        user_rows=user_rows,
+        user_skill_ids=user_skill_ids,
+        user_skill_names=user_skill_names,
+        user_skill_names_canon=user_skill_names_canon,
+    )
+    return matches
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Doc 16 v2 public matching contract (2026-07-12)
+# ═════════════════════════════════════════════════════════════════════
+
+
+class MarketDataUnavailable(Exception):
+    """Doc 16 §3 — typed infrastructure failure.
+
+    Raised by `compute_matches_in_memory_v2` when a known infrastructure
+    exception occurs at the DB-touching sites: the resolver's synonym
+    lookup, the market fetch, per-job skill lookups, or per-job stored
+    embedding load. Workforce catches this at the tool boundary and
+    maps to `market_data_unavailable` (Doc 16 §6).
+
+    EXPLICITLY NOT raised for:
+      - user-side embedding model / encoding failures (engine.py:168-170
+        graceful-degradation path preserved unchanged);
+      - programming errors (AttributeError, KeyError, TypeError, etc.)
+        remain visible as defects.
+
+    Wraps the underlying exception via `__cause__` for observability.
+    """
+
+
+@dataclass(frozen=True)
+class MatchRunResult:
+    """Doc 16 §1 public envelope. Four fields, no synthesized outcome
+    codes — workforce derives outcomes from measured facts.
+
+    `frozen=True` prevents field reassignment but does NOT deep-freeze
+    the `matches` list. Callers MUST NOT mutate `matches` in place.
+
+    `target_resolution_state == None` means the wrapper did NOT run the
+    resolver because the caller pre-supplied `staged.target_noc`. It is
+    semantically distinct from "unresolved" (a measured resolver
+    failure). Consumers MUST NOT interpret None as unresolved.
+    """
+    matches: list[MatchResult]
+    jobs_fetched_count: int
+    target_resolution_state: str | None
+    target_noc: str | None
+
+
+def _score_prepared_jobs(
+    staged: StagedProfile, top: int, *,
+    user_rows: list[UserSkillRow],
+    user_skill_ids: set[str],
+    user_skill_names: set[str],
+    user_skill_names_canon: set[str],
+) -> tuple[list[MatchResult], int]:
+    """Shared scoring loop. Returns (matches, jobs_fetched_count).
+
+    Doc 16 §8.1 invariant: one market fetch supplies both the count
+    and the scored population. Neither entry point calls
+    `_fetch_eligible_jobs` a second time.
+
+    This helper does NOT prepare user skills. The caller is responsible
+    for `build_user_skill_rows` / `derive_user_skill_sets` and passes
+    the results in. That's what lets the legacy path preserve its
+    original order (skills → resolve → score) while v2 uses its own
+    order (resolve → skills → score) without duplicating the scoring
+    loop.
+
+    The caller is also responsible for resolving `staged.target_noc`
+    before invoking this helper (or leaving it unresolved). This
+    function neither reads nor calls any resolver — it consumes
+    `staged.target_noc` as-is. This enforces Doc 16 §8.1's "resolve
+    once, reuse both state and NOC" mandate: the scoring loop sees
+    exactly the NOC the caller resolved (or supplied), never a second
+    resolution.
+    """
     user_embeddings_matrix = _maybe_embed_user_skill_rows(user_rows)
 
     profile_dict = {
-        "profile_id": staged.session_id,  # placeholder; nothing is persisted
+        "profile_id": staged.session_id,
         "preferred_location": staged.preferred_location,
         "target_role_text": staged.target_role_text,
         "target_noc": staged.target_noc,
@@ -1809,8 +1882,12 @@ def compute_matches_in_memory(staged: StagedProfile, top: int = 5) -> list[Match
         "shift_preference": staged.shift_preference,
         "experience_text": staged.experience_text,
     }
+
+    fetched = _fetch_eligible_jobs()
+    jobs_fetched_count = len(fetched)
+
     results: list[MatchResult] = []
-    for job in _fetch_eligible_jobs():
+    for job in fetched:
         skills = _fetch_job_skills(str(job["job_id"]))
         job_skill_embeddings = (
             _fetch_job_skill_embeddings(str(job["job_id"]))
@@ -1825,8 +1902,108 @@ def compute_matches_in_memory(staged: StagedProfile, top: int = 5) -> list[Match
         )
         if m is not None:
             results.append(m)
-    results.sort(key=lambda r: (r.match_eligible, r.match_score), reverse=True)
-    return results[:top]
+    results.sort(
+        key=lambda r: (r.match_eligible, r.match_score), reverse=True,
+    )
+    return results[:top], jobs_fetched_count
+
+
+def compute_matches_in_memory_v2(
+    staged: StagedProfile, top: int = 5,
+) -> MatchRunResult:
+    """Doc 16 §1 public matching contract.
+
+    Same scoring behavior as `compute_matches_in_memory` — this wrapper
+    adds NO new engine logic. It returns a typed envelope that lets
+    consumers stop synthesizing empty-result causality from
+    `matches=[] AND target_noc=None`.
+
+    Resolution discipline (Doc 16 §8.1):
+      - If `staged.target_noc` is pre-supplied → the wrapper does NOT
+        call any resolver. `target_resolution_state` is `None`
+        (semantically: "no measurement was made because none was
+        required"), and `target_noc` echoes what the caller supplied.
+      - Otherwise → the wrapper calls `resolve_title_to_noc_with_state`
+        EXACTLY ONCE, writes its result onto `staged.target_noc` (so
+        the scoring loop consumes the same NOC the envelope reports),
+        and records the state on the envelope. Under NO circumstances
+        does this wrapper call `resolve_title_to_noc` (the state-less
+        legacy resolver) — that would open a "resolve twice, drift"
+        surface Doc 16 §8.1 explicitly prohibits.
+
+    Failure discipline (Doc 16 §3):
+      - Known infrastructure exceptions (psycopg.Error at any of the
+        four DB-touching sites) are caught and re-raised as
+        `MarketDataUnavailable` with `__cause__` preserved.
+      - Everything else (AttributeError, KeyError, TypeError, etc.)
+        propagates unchanged as a defect.
+      - User-side embedding model failure remains lexical-only
+        graceful degradation, unchanged.
+
+    Args:
+      staged: session profile with target text and skills.
+      top: max rows to return. Must be >= 1 (Doc 16 §8.1 precondition;
+        the length invariant `len(matches) == min(top, jobs_fetched_count)`
+        would violate on negative slicing).
+
+    Returns:
+      `MatchRunResult` with the four locked fields.
+
+    Raises:
+      ValueError: if `top < 1`.
+      MarketDataUnavailable: on known infrastructure failure at any
+        DB-touching site.
+    """
+    if top < 1:
+        raise ValueError(
+            f"top must be >= 1 (Doc 16 §8.1 precondition); got {top}"
+        )
+
+    import psycopg
+
+    try:
+        # Doc 16 §8.1 mandate: resolve first (v2-specific ordering).
+        # Only ONE resolver call, and only the state-preserving path.
+        if staged.target_noc:
+            resolution_state: str | None = None
+            resolved_noc: str | None = staged.target_noc
+        elif staged.target_role_text:
+            resolution = resolve_title_to_noc_with_state(
+                staged.target_role_text,
+            )
+            resolution_state = resolution.state.value
+            resolved_noc = resolution.noc_code
+            staged.target_noc = resolved_noc
+        else:
+            resolution_state = None
+            resolved_noc = None
+
+        # Skill preparation THEN scoring (v2 ordering — differs from
+        # legacy's skills-first-then-resolve deliberately; this is the
+        # documented v2 behavior).
+        user_rows = build_user_skill_rows(staged.skills)
+        user_skill_ids, user_skill_names, user_skill_names_canon = (
+            derive_user_skill_sets(user_rows)
+        )
+        matches, jobs_fetched_count = _score_prepared_jobs(
+            staged, top,
+            user_rows=user_rows,
+            user_skill_ids=user_skill_ids,
+            user_skill_names=user_skill_names,
+            user_skill_names_canon=user_skill_names_canon,
+        )
+    except psycopg.Error as e:
+        raise MarketDataUnavailable(
+            "Local job market data is unavailable "
+            "(infrastructure failure).",
+        ) from e
+
+    return MatchRunResult(
+        matches=matches,
+        jobs_fetched_count=jobs_fetched_count,
+        target_resolution_state=resolution_state,
+        target_noc=resolved_noc,
+    )
 
 
 def next_skill_to_unlock_in_memory(staged: StagedProfile) -> tuple[str | None, int]:

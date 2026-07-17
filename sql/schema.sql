@@ -160,6 +160,85 @@ CREATE INDEX IF NOT EXISTS ix_job_title_trgm
     ON core.job_posting USING gin (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS ix_job_noc ON core.job_posting(noc_code);
 
+-- ============================================================================
+-- Step 1A (2026-07-15) — Source-data integrity columns.
+-- See docs/matching-revise/step-1-source-data-integrity.md
+--
+-- Description axis: distinguishes full JD from an excerpt-only preview,
+-- with an evidence status derived from provenance (not character count).
+--
+-- Location axis: distinguishes source-declared text from geometry
+-- (which is not authoritative for job location), with resolution status
+-- and evidence provenance orthogonal. Enforced downstream by the
+-- v_current_job view (§2d) which requires resolution_status='resolved'
+-- AND normalized_job_location='Sault Ste. Marie'.
+--
+-- All columns nullable to allow additive migration; backfill script
+-- populates historical rows per docs/matching-revise/step-1-*.md §3.
+-- ============================================================================
+ALTER TABLE core.job_posting
+    ADD COLUMN IF NOT EXISTS description_full            TEXT,
+    ADD COLUMN IF NOT EXISTS description_excerpt         TEXT,
+    ADD COLUMN IF NOT EXISTS description_evidence_status VARCHAR(20),
+    ADD COLUMN IF NOT EXISTS source_location_text        TEXT,
+    ADD COLUMN IF NOT EXISTS source_coordinates          JSONB,
+    ADD COLUMN IF NOT EXISTS normalized_job_location     TEXT,
+    ADD COLUMN IF NOT EXISTS location_resolution_status  VARCHAR(20),
+    ADD COLUMN IF NOT EXISTS location_provenance         VARCHAR(20);
+
+-- CHECK constraints on the enum-shaped status columns. Kept out-of-line
+-- and gated on the column existing (idempotent re-run safety).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'ck_job_desc_evidence_status'
+           AND conrelid = 'core.job_posting'::regclass
+    ) THEN
+        ALTER TABLE core.job_posting
+            ADD CONSTRAINT ck_job_desc_evidence_status
+                CHECK (description_evidence_status IS NULL
+                       OR description_evidence_status IN
+                          ('full_source', 'excerpt_only',
+                           'missing', 'parse_error'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'ck_job_loc_resolution_status'
+           AND conrelid = 'core.job_posting'::regclass
+    ) THEN
+        ALTER TABLE core.job_posting
+            ADD CONSTRAINT ck_job_loc_resolution_status
+                CHECK (location_resolution_status IS NULL
+                       OR location_resolution_status IN
+                          ('resolved', 'unresolved', 'missing',
+                           'conflicting', 'invalid'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'ck_job_loc_provenance'
+           AND conrelid = 'core.job_posting'::regclass
+    ) THEN
+        ALTER TABLE core.job_posting
+            ADD CONSTRAINT ck_job_loc_provenance
+                CHECK (location_provenance IS NULL
+                       OR location_provenance IN
+                          ('source_declared', 'detail_page',
+                           'geometry', 'multiple', 'none'));
+    END IF;
+END $$;
+
+-- Indexes for the v_current_job filter clauses added in impl step 9.
+-- Partial index on the SSM-only, resolved combination — the only rows
+-- the matcher's view surfaces. Non-SSM/unresolved rows persist in the
+-- table but the index skips them entirely.
+CREATE INDEX IF NOT EXISTS ix_job_ssm_market
+    ON core.job_posting(is_active, last_seen_at DESC)
+    WHERE location_resolution_status = 'resolved'
+      AND normalized_job_location = 'Sault Ste. Marie';
+
 -- Skills extracted from a job posting's text.
 CREATE TABLE IF NOT EXISTS extracted.job_skill (
     job_id             UUID REFERENCES core.job_posting(job_id) ON DELETE CASCADE,
@@ -467,12 +546,25 @@ CREATE INDEX IF NOT EXISTS ix_raw_job_source ON raw.job_posting(source, source_j
 -- env — changing it changes what the product means. If the rule needs
 -- to change, write a migration that creates v_current_job_vN and bump
 -- the dataset_version / engine_version published in the API envelope.
+-- Step 1A cutover 2026-07-16: v_current_job is now SSM-verified only.
+-- The two new AND clauses enforce the source-integrity invariant:
+--   * location_resolution_status = 'resolved'   → we successfully
+--     classified the declared location text
+--   * normalized_job_location    = 'Sault Ste. Marie' → the resolved
+--     value IS the SSM canonical spelling
+-- Rows that lack a canonical SSM classification (AWIC coord-only,
+-- SCCC non-SSM Algoma communities, any invalid/unresolved evidence)
+-- persist in core.job_posting but do not enter the live market until
+-- Step 1B enriches AWIC to a resolved classification. Engine version
+-- bumped to job-match-v1.2.0 alongside this cutover.
 CREATE OR REPLACE VIEW core.v_current_job AS
 SELECT *
   FROM core.job_posting
  WHERE is_active = TRUE
    AND last_seen_at >= NOW() - INTERVAL '2 days'
-   AND (closing_date IS NULL OR closing_date >= CURRENT_DATE);
+   AND (closing_date IS NULL OR closing_date >= CURRENT_DATE)
+   AND location_resolution_status = 'resolved'
+   AND normalized_job_location    = 'Sault Ste. Marie';
 
 -- Data-status view used by /v1/admin/data-status.
 CREATE OR REPLACE VIEW pipeline.v_data_status AS

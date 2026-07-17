@@ -36,6 +36,13 @@ class NormalizedJob:
     source_job_id: str
     title: str
     employer: str | None = None
+    # DEPRECATED (Step 1A, 2026-07-15): callers should populate the
+    # description_* and location_* axes below; `location` becomes a
+    # copy of `normalized_job_location` (NULL when resolution didn't
+    # succeed) and `description` becomes COALESCE(description_full,
+    # description_excerpt). Retained for one release cycle so
+    # in-flight callers don't break. See docs/matching-revise/step-1
+    # -source-data-integrity.md §2b.
     location: str | None = None
     region_code: str | None = None
     description: str | None = None
@@ -49,6 +56,43 @@ class NormalizedJob:
     remote_flag: bool | None = None
     noc_code: str | None = None
     raw_payload: dict = field(default_factory=dict)
+
+    # Step 1A description axis. Provenance-derived — see spec §2c/§2g.
+    #   full_source  — complete JD body captured
+    #   excerpt_only — only a preview captured
+    #   missing      — no description data present
+    #   parse_error  — data present but couldn't be used
+    #
+    # Status defaults to None (NOT "missing") so `upsert_job` can
+    # distinguish "connector not yet migrated to Step 1A" from
+    # "connector explicitly measured this row as missing." During
+    # the transitional period, unmigrated connectors leaving these
+    # None cause `upsert_job` to preserve their `job.description`
+    # legacy value instead of erasing it. Once every producer emits
+    # a real status, the None default becomes dead code and can be
+    # tightened to a required enum.
+    description_full: str | None = None
+    description_excerpt: str | None = None
+    description_evidence_status: str | None = None
+
+    # Step 1A location axis. Five orthogonal fields — see spec §2c.
+    # Same None-default rationale as description axis.
+    #
+    # source_location_text: exact source-declared string (never a
+    #   hardcoded fallback).
+    # source_coordinates: preserved GeoJSON [lon, lat, …] when source
+    #   provides one; NOT authoritative for job location.
+    # normalized_job_location: trustworthy location; populated only
+    #   when resolution succeeded (§2d gates the market on it).
+    # location_resolution_status:
+    #   resolved | unresolved | missing | conflicting | invalid
+    # location_provenance:
+    #   source_declared | detail_page | geometry | multiple | none
+    source_location_text: str | None = None
+    source_coordinates: list | None = None  # JSONB-serialized at write
+    normalized_job_location: str | None = None
+    location_resolution_status: str | None = None
+    location_provenance: str | None = None
 
 
 @dataclass
@@ -173,33 +217,170 @@ def write_raw_job(job: NormalizedJob) -> None:
 
 
 def upsert_job(job: NormalizedJob) -> str | None:
-    """Upsert into core.job_posting and return job_id. Updates last_seen_at."""
+    """Upsert into core.job_posting and return job_id. Updates last_seen_at.
+
+    Step 1A (2026-07-15) transitional persistence:
+      - New description/location axes are written when the connector
+        provides them.
+      - Legacy `location` / `description` columns are ALSO written for
+        one release cycle so in-flight callers don't break.
+
+    Determining which value wins for the legacy columns depends on
+    whether the connector has been migrated to Step 1A:
+
+      Migrated connector (emits explicit status):
+        legacy `location`    = normalized_job_location
+        legacy `description` = description_full,
+                               else description_excerpt
+                               (blank strings treated as absent —
+                               matches SQL COALESCE semantics without
+                               relying on Python truthiness).
+
+      Unmigrated connector (statuses are None):
+        legacy `location`    = job.location            (preserved)
+        legacy `description` = job.description         (preserved)
+        No erasure — see spec correction 2026-07-16.
+
+    Status = None is the sentinel for "connector hasn't been migrated
+    yet." Migrated connectors MUST emit an explicit status literal
+    ('missing', 'excerpt_only', etc.) even when the source genuinely
+    lacks data. When every producer is migrated, the None sentinel
+    becomes dead code and the dataclass defaults can be tightened.
+    """
+    import json
+
     employer_id = upsert_employer(job.employer)
+
+    def _blank_to_none(value: str | None) -> str | None:
+        """Normalize whitespace-only strings to None so
+        description_full = '' doesn't fall through to excerpt
+        differently than SQL COALESCE would.
+        """
+        if not isinstance(value, str):
+            return None
+        stripped = value.strip()
+        return stripped if stripped else None
+
+    description_full_norm = _blank_to_none(job.description_full)
+    description_excerpt_norm = _blank_to_none(job.description_excerpt)
+    normalized_job_location_norm = _blank_to_none(job.normalized_job_location)
+
+    # Transitional persistence: only derive legacy fields from the new
+    # axes when the connector has been migrated (status is not None).
+    # Unmigrated connectors keep their existing job.location /
+    # job.description values.
+    connector_migrated_description = (
+        job.description_evidence_status is not None
+    )
+    connector_migrated_location = (
+        job.location_resolution_status is not None
+    )
+
+    if connector_migrated_description:
+        # Use is-not-None check (not Python `or`) so an explicit "" from
+        # a migrated connector doesn't accidentally fall through.
+        if description_full_norm is not None:
+            legacy_description = description_full_norm
+        elif description_excerpt_norm is not None:
+            legacy_description = description_excerpt_norm
+        else:
+            legacy_description = None
+    else:
+        legacy_description = job.description
+
+    if connector_migrated_location:
+        legacy_location = normalized_job_location_norm
+    else:
+        legacy_location = job.location
+
+    # Coordinates persisted as JSONB — JSON-encode if the connector
+    # supplied a Python list. None stays None.
+    source_coords_json = (
+        json.dumps(job.source_coordinates)
+        if job.source_coordinates is not None else None
+    )
+
     sql = """
     INSERT INTO core.job_posting
         (source, source_job_id, title, employer, employer_id, location, region_code,
          description, url, posted_date, closing_date, salary_text, salary_low, salary_high,
-         employment_type, remote_flag, noc_code, is_active, last_seen_at, updated_at)
-    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,NOW(),NOW())
+         employment_type, remote_flag, noc_code,
+         description_full, description_excerpt, description_evidence_status,
+         source_location_text, source_coordinates, normalized_job_location,
+         location_resolution_status, location_provenance,
+         is_active, last_seen_at, updated_at)
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,
+            %s,%s,%s,
+            %s,%s,
+            TRUE,NOW(),NOW())
     ON CONFLICT (source, source_job_id) DO UPDATE SET
-        title          = EXCLUDED.title,
-        employer       = EXCLUDED.employer,
-        employer_id    = EXCLUDED.employer_id,
-        location       = EXCLUDED.location,
-        region_code    = EXCLUDED.region_code,
-        description    = EXCLUDED.description,
-        url            = EXCLUDED.url,
-        posted_date    = EXCLUDED.posted_date,
-        closing_date   = EXCLUDED.closing_date,
-        salary_text    = EXCLUDED.salary_text,
-        salary_low     = EXCLUDED.salary_low,
-        salary_high    = EXCLUDED.salary_high,
-        employment_type= EXCLUDED.employment_type,
-        remote_flag    = EXCLUDED.remote_flag,
-        noc_code       = EXCLUDED.noc_code,
-        is_active      = TRUE,
-        last_seen_at   = NOW(),
-        updated_at     = NOW()
+        title                       = EXCLUDED.title,
+        employer                    = EXCLUDED.employer,
+        employer_id                 = EXCLUDED.employer_id,
+        location                    = EXCLUDED.location,
+        region_code                 = EXCLUDED.region_code,
+        description                 = EXCLUDED.description,
+        url                         = EXCLUDED.url,
+        posted_date                 = EXCLUDED.posted_date,
+        closing_date                = EXCLUDED.closing_date,
+        salary_text                 = EXCLUDED.salary_text,
+        salary_low                  = EXCLUDED.salary_low,
+        salary_high                 = EXCLUDED.salary_high,
+        employment_type             = EXCLUDED.employment_type,
+        remote_flag                 = EXCLUDED.remote_flag,
+        noc_code                    = EXCLUDED.noc_code,
+        -- Step 1A (2026-07-16): preserve backfilled new-axis values
+        -- when the incoming row comes from an unmigrated connector
+        -- (status sentinel is NULL). Prevents a re-ingest by an
+        -- unmigrated connector from erasing a row that backfill
+        -- populated. Migrated connectors emit an explicit status
+        -- ('missing', 'excerpt_only', etc.) and their writes DO
+        -- overwrite. See docs/matching-revise/step-1-*.md correction
+        -- 2026-07-16.
+        description_full = CASE
+            WHEN EXCLUDED.description_evidence_status IS NULL
+                THEN core.job_posting.description_full
+            ELSE EXCLUDED.description_full
+        END,
+        description_excerpt = CASE
+            WHEN EXCLUDED.description_evidence_status IS NULL
+                THEN core.job_posting.description_excerpt
+            ELSE EXCLUDED.description_excerpt
+        END,
+        description_evidence_status = CASE
+            WHEN EXCLUDED.description_evidence_status IS NULL
+                THEN core.job_posting.description_evidence_status
+            ELSE EXCLUDED.description_evidence_status
+        END,
+        source_location_text = CASE
+            WHEN EXCLUDED.location_resolution_status IS NULL
+                THEN core.job_posting.source_location_text
+            ELSE EXCLUDED.source_location_text
+        END,
+        source_coordinates = CASE
+            WHEN EXCLUDED.location_resolution_status IS NULL
+                THEN core.job_posting.source_coordinates
+            ELSE EXCLUDED.source_coordinates
+        END,
+        normalized_job_location = CASE
+            WHEN EXCLUDED.location_resolution_status IS NULL
+                THEN core.job_posting.normalized_job_location
+            ELSE EXCLUDED.normalized_job_location
+        END,
+        location_resolution_status = CASE
+            WHEN EXCLUDED.location_resolution_status IS NULL
+                THEN core.job_posting.location_resolution_status
+            ELSE EXCLUDED.location_resolution_status
+        END,
+        location_provenance = CASE
+            WHEN EXCLUDED.location_resolution_status IS NULL
+                THEN core.job_posting.location_provenance
+            ELSE EXCLUDED.location_provenance
+        END,
+        is_active                   = TRUE,
+        last_seen_at                = NOW(),
+        updated_at                  = NOW()
     RETURNING job_id
     """
     with sync_cursor() as cur:
@@ -207,10 +388,15 @@ def upsert_job(job: NormalizedJob) -> str | None:
             sql,
             (
                 job.source, job.source_job_id, job.title, job.employer, employer_id,
-                job.location, job.region_code, job.description, job.url,
+                legacy_location, job.region_code, legacy_description, job.url,
                 job.posted_date, job.closing_date, job.salary_text,
                 job.salary_low, job.salary_high, job.employment_type,
                 job.remote_flag, job.noc_code,
+                description_full_norm, description_excerpt_norm,
+                job.description_evidence_status,
+                job.source_location_text, source_coords_json,
+                normalized_job_location_norm,
+                job.location_resolution_status, job.location_provenance,
             ),
         )
         row = cur.fetchone()

@@ -186,7 +186,6 @@ def _sample_result() -> dict:
             "title_match_similarity": 0.85,
             "title_match_override": False,
             "recency_days": 4,
-            "location_boosted": True,
             "work_type_fit": "matched",
             "shift_fit": "no_signal",
             "credential_warning_present": False,
@@ -202,7 +201,6 @@ def _sample_result() -> dict:
                     "preferred_weight": 0.2,
                 },
                 "boosts": {
-                    "location": 0.04,
                     "recency": 0.03,
                     "target_role": 0.02,
                     "target_noc_match": 0.10,   # Step 2 occupation boost
